@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Salidas que genera el propio notebook al ejecutarse
+perfil_datos.csv
+comparacion_metodos.csv
+convergencia.csv
+resumen_informe.md
