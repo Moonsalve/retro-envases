@@ -23,25 +23,33 @@ volumen exacto se conoce por fórmula cerrada. Eso permite medir el error del mo
 numérico **aislado** de los errores de imagen, y por tanto saber cuánto del presupuesto
 de error del 5 % queda disponible para la fase de cámara.
 
+## Los dos notebooks
+
+| Notebook | Celdas | Para qué |
+|---|---|---|
+| **`Lab_RetroEnvases.ipynb`** | **16** | **El entregable.** Lo que exige el enunciado, directo al grano. |
+| `Lab_Integracion_Numerica_RetroEnvases_Fase1.ipynb` | 60 | Versión extendida: estudio de convergencia con dos mallas, barrido del orden de Gauss, pruebas de condiciones no satisfechas. Material de apoyo para el informe. |
+
+Ambos dan los mismos resultados; el largo los justifica con más experimentos.
+
 ## Cómo ejecutarlo
 
 ### Opción A — Google Colab (recomendada)
 
 1. Abre [colab.research.google.com](https://colab.research.google.com)
-2. `Archivo → Subir notebook` y selecciona
-   `notebooks/Lab_Integracion_Numerica_RetroEnvases_Fase1.ipynb`
+2. `Archivo → Subir notebook` y selecciona `notebooks/Lab_RetroEnvases.ipynb`
 3. `Entorno de ejecución → Ejecutar todo` (`Ctrl+F9`)
 
 No requiere instalar nada: Colab ya trae `numpy`, `scipy`, `pandas` y `matplotlib`.
-Tiempo de ejecución: ~15 segundos.
+Tiempo de ejecución: ~5 segundos.
 
 ### Opción B — Local
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install numpy scipy pandas matplotlib tabulate jupyter
-jupyter notebook notebooks/Lab_Integracion_Numerica_RetroEnvases_Fase1.ipynb
+pip install numpy scipy pandas matplotlib jupyter
+jupyter notebook notebooks/Lab_RetroEnvases.ipynb
 ```
 
 ### Verificación independiente de las fórmulas
@@ -57,17 +65,17 @@ que afirma el notebook se reproducen. No requiere dependencias.
 
 ## Personalizar el envase
 
-En la celda 2.5 del notebook, edita `TRAMOS`:
+En la celda 4 del notebook corto (sección 1), edita `TRAMOS`:
 
 ```python
-TRAMOS = (
-    #      z_ini  z_fin  r_ini  r_fin   nombre
-    Tramo(  0.0,   1.0,   2.50,  3.40, "base (pie)"),
-    Tramo(  1.0,  15.0,   3.40,  3.40, "cuerpo cilíndrico"),
-    Tramo( 15.0,  18.5,   3.40,  1.35, "hombro"),
-    Tramo( 18.5,  20.0,   1.35,  1.35, "cuello"),
-    Tramo( 20.0,  21.0,   1.35,  1.45, "boca / rosca"),
-)
+# (z_inicio, z_fin, radio_inicio, radio_fin, nombre)   en cm
+TRAMOS = [
+    ( 0.0,  1.0, 2.50, 3.40, "base (pie)"),
+    ( 1.0, 15.0, 3.40, 3.40, "cuerpo cilíndrico"),
+    (15.0, 18.5, 3.40, 1.35, "hombro"),
+    (18.5, 20.0, 1.35, 1.35, "cuello"),
+    (20.0, 21.0, 1.35, 1.45, "boca / rosca"),
+]
 ```
 
 Cada tramo es un tronco de cono (cilindro si `r_ini == r_fin`). El volumen exacto de
@@ -84,9 +92,9 @@ referencia se recalcula solo: es la suma cerrada de los volúmenes de los tronco
 | Boole | Newton-Cotes grado 4 | n múltiplo de 4 | O(Δz⁶) | 5 |
 | Gauss-Legendre | Cuadratura gaussiana | — (m nodos) | exacta grado ≤ 2m−1 | 2m−1 |
 
-Gauss se implementa en dos variantes: evaluando el perfil analítico (ideal) y evaluando
-un spline cúbico ajustado a la tabla de datos (el escenario realista de la fase de
-cámara).
+Gauss se calcula de dos formas, ambas sobre un spline cúbico ajustado a los datos:
+**global** (una cuadratura en todo [a,b]) y **por tramos** (una en cada tramo del
+envase). La diferencia entre ambas es un factor 150 en precisión.
 
 ## Resultados principales
 
@@ -101,7 +109,12 @@ teórico:**
 | 2 | Simpson 3/8 | O(Δz⁴) | 0.071 | 0.23 % |
 | 3 | Simpson 1/3 | O(Δz⁴) | 0.263 | 0.85 % |
 | 4 | Boole | O(Δz⁶) | 0.301 | 0.97 % |
-| 5 | Gauss 5 nodos | grado 9 | 3.91 | 12.69 % |
+| 5 | Gauss global, 5 nodos | grado 9 | 3.01 | 9.75 % |
+
+Y Gauss aplicado **por tramos**, con los mismos 5 nodos, es el mejor de todos:
+0.020 cm³ (0.065 % del margen) con solo 25 evaluaciones frente a las 61 de los
+Newton-Cotes. Misma fórmula, 150× más preciso, solo por partir el intervalo en los
+quiebres del envase.
 
 **2. Los cuatro Newton-Cotes convergen a orden ≈ 2, sin importar su orden teórico:**
 
@@ -119,9 +132,10 @@ orden de la fórmula.
 
 **3. Gauss-Legendre global es el peor método sobre este problema.** Con m = 2 y m = 3
 nodos ni siquiera cumple el criterio del 5 % (5.12 % y 5.26 % de error), y su error no
-decrece monótonamente al añadir nodos. Necesita ≈ 80 nodos para igualar al trapecio con
-61 puntos. Es una regla global aplicada a una función quebrada: fuera de su régimen de
-validez.
+decrece monótonamente al añadir nodos. Es una regla global aplicada a una función
+quebrada: fuera de su régimen de validez. Aplicado **por tramos** pasa a ser el método
+más preciso del notebook — la corrección no está en cambiar de fórmula sino en respetar
+la estructura del problema.
 
 **4. El presupuesto de error lo domina la escala, no la cuadratura.** Como V ∝ r², un
 error relativo ε en la escala píxel→cm produce 2ε en el volumen:
@@ -140,9 +154,9 @@ trapecio baja a 2.6e-5 %), mientras que mejorar la escala cuesta trabajo físico
 
 | Aspecto | Decisión | Justificación |
 |---|---|---|
-| Método a producción | Simpson 1/3, trapecio de respaldo | Buena precisión y el trapecio no tiene restricciones sobre n |
+| Método a producción | Trapecio o Simpson 1/3 sobre los datos crudos | Robustos ante aristas y ruido; el trapecio no tiene restricciones sobre n |
 | Estrategia de malla | Remuestrear a n múltiplo de 12; integrar por tramos si se detectan quiebres | Permite los cuatro métodos y recupera el orden teórico |
-| Gauss | Se reporta, no se usa como valor principal | Su ventaja teórica no sobrevive a datos ruidosos |
+| Gauss | Solo por tramos, nunca global | Global falla el 5 % con pocos nodos; por tramos exige detectar los quiebres del perfil |
 | Validación | Volumen **exterior** por desplazamiento de agua | Única cantidad comparable con una silueta |
 | Escala | ArUco + homografía, dos clics de respaldo | Error objetivo < 1 %, límite < 2.5 % |
 | Segmentación | Otsu/Canny **y** GrabCut, comparados | Cubre el requisito de la Etapa 1 de investigar dos estrategias |
@@ -173,12 +187,14 @@ y los requisitos de interfaz de la §8.
 ```
 retro-envases/
 ├── notebooks/
-│   └── Lab_Integracion_Numerica_RetroEnvases_Fase1.ipynb   ← el entregable
+│   ├── Lab_RetroEnvases.ipynb                             ← el entregable (16 celdas)
+│   └── Lab_Integracion_Numerica_RetroEnvases_Fase1.ipynb   versión extendida (60)
 ├── tests/
 │   └── verificar_formulas.py      verificación independiente, sin dependencias
-├── build/                         generador del notebook (celdas en módulos .py)
+├── build/                         generadores (las celdas viven en .py, no en JSON)
+│   ├── construir_corto.py         → Lab_RetroEnvases.ipynb
 │   ├── cells_01_intro.py ... cells_07_graficas.py
-│   └── construir_notebook.py
+│   └── construir_notebook.py      → versión extendida
 └── README.md
 ```
 
@@ -187,7 +203,8 @@ permite versionarlas y editarlas con herramientas de texto en vez de pelear con 
 de un `.ipynb`. Para reconstruirlo:
 
 ```bash
-python3 build/construir_notebook.py
+python3 build/construir_corto.py      # versión corta
+python3 build/construir_notebook.py   # versión extendida
 ```
 
 ## Archivos que produce el notebook al ejecutarse
@@ -196,5 +213,5 @@ python3 build/construir_notebook.py
 |---|---|
 | `perfil_datos.csv` | tabla (i, zᵢ, rᵢ, rᵢ², πrᵢ²) |
 | `comparacion_metodos.csv` | tabla comparativa con todos los parámetros |
-| `convergencia.csv` | barrido de error frente a Δz, ambas mallas |
-| `resumen_informe.md` | resumen en Markdown listo para el informe |
+| `convergencia.csv` | barrido de error frente a Δz (solo versión extendida) |
+| `resumen_informe.md` | resumen en Markdown listo para el informe (solo versión extendida) |
