@@ -27,8 +27,8 @@ de error del 5 % queda disponible para la fase de cámara.
 
 | Notebook | Celdas | Para qué |
 |---|---|---|
-| **`Lab_RetroEnvases.ipynb`** | **16** | **El entregable.** Lo que exige el enunciado, directo al grano, y una celda final de texto con todos los resultados consolidados. |
-| `Lab_Integracion_Numerica_RetroEnvases_Fase1.ipynb` | 58 | Versión extendida: estudio de convergencia con dos mallas, barrido del orden de Gauss, pruebas de condiciones no satisfechas. Material de apoyo. |
+| **`Lab_RetroEnvases.ipynb`** | **16** | **El entregable.** Los cuatro métodos del enunciado, directo al grano, y una celda final de texto con todos los resultados consolidados. |
+| `Lab_Integracion_Numerica_RetroEnvases_Fase1.ipynb` | 58 | Versión extendida (incluye además Boole y las dos variantes de Gauss): estudio de convergencia con dos mallas, barrido del orden de Gauss, pruebas de condiciones no satisfechas. Material de apoyo. |
 
 Ambos dan los mismos resultados; el largo los justifica con más experimentos.
 
@@ -86,15 +86,17 @@ referencia se recalcula solo: es la suma cerrada de los volúmenes de los tronco
 
 | Método | Familia | Condición sobre n | Orden del error | Grado de exactitud |
 |---|---|---|---|---|
-| Trapecio | Newton-Cotes grado 1 | ninguna | O(Δz²) | 1 |
-| Simpson 1/3 | Newton-Cotes grado 2 | n par | O(Δz⁴) | 3 |
-| Simpson 3/8 | Newton-Cotes grado 3 | n múltiplo de 3 | O(Δz⁴) | 3 |
-| Boole | Newton-Cotes grado 4 | n múltiplo de 4 | O(Δz⁶) | 5 |
-| Gauss-Legendre | Cuadratura gaussiana | — (m nodos) | exacta grado ≤ 2m−1 | 2m−1 |
+| **Regla del Trapecio** | Newton-Cotes grado 1 | ninguna | O(Δz²) | 1 |
+| **Regla de Simpson** | Newton-Cotes grado 2 | n par | O(Δz⁴) | 3 |
+| **Newton-Cotes 3/8** | Newton-Cotes grado 3 | n múltiplo de 3 | O(Δz⁴) | 3 |
+| **Cuadratura de Gauss** | Gauss-Legendre | — (m nodos) | exacta grado ≤ 2m−1 | 2m−1 |
 
-Gauss se calcula de dos formas, ambas sobre un spline cúbico ajustado a los datos:
-**global** (una cuadratura en todo [a,b]) y **por tramos** (una en cada tramo del
-envase). La diferencia entre ambas es un factor 150 en precisión.
+La función `newton_cotes(z, r, grado)` acepta también `grado=4` (regla de Boole,
+O(Δz⁶)) si se quiere una fórmula de orden superior.
+
+Gauss se aplica **por tramos** (una cuadratura en cada tramo del envase) sobre un spline
+cúbico ajustado a los datos. El notebook muestra también qué pasa si se aplica de forma
+**global**: un factor 150 peor.
 
 ## Resultados principales
 
@@ -103,39 +105,35 @@ Envase de prueba: botella PET de 600 mL, 21 cm de altura, V exacto = **616.60824
 **1. Con malla ciega (n = 60), el ranking de precisión sale invertido respecto al orden
 teórico:**
 
-| Puesto | Método | Orden teórico | Error [cm³] | % del margen del 5 % |
-|---|---|---|---|---|
-| 1 | Trapecio | O(Δz²) | 0.063 | 0.21 % |
-| 2 | Simpson 3/8 | O(Δz⁴) | 0.071 | 0.23 % |
-| 3 | Simpson 1/3 | O(Δz⁴) | 0.263 | 0.85 % |
-| 4 | Boole | O(Δz⁶) | 0.301 | 0.97 % |
-| 5 | Gauss global, 5 nodos | grado 9 | 3.01 | 9.75 % |
+| Puesto | Método | Orden teórico | Evals | Error [cm³] | % del margen del 5 % |
+|---|---|---|---|---|---|
+| 1 | Gauss, 5 nodos por tramos | grado ≤ 9 | 25 | 0.020 | 0.07 % |
+| 2 | Trapecio | O(Δz²) | 61 | 0.063 | 0.20 % |
+| 3 | Newton-Cotes 3/8 | O(Δz⁴) | 61 | 0.071 | 0.23 % |
+| 4 | Simpson | O(Δz⁴) | 61 | 0.263 | 0.85 % |
 
-Y Gauss aplicado **por tramos**, con los mismos 5 nodos, es el mejor de todos:
-0.020 cm³ (0.065 % del margen) con solo 25 evaluaciones frente a las 61 de los
-Newton-Cotes. Misma fórmula, 150× más preciso, solo por partir el intervalo en los
-quiebres del envase.
+Entre los Newton-Cotes el ranking sale invertido: el trapecio (orden 2) es 4.2 veces más
+preciso que Simpson (orden 4). Y Gauss gana con menos de la mitad de evaluaciones — pero
+solo porque se aplica por tramos: de forma global da 0.49 % de error, 150 veces peor.
 
-**2. Los cuatro Newton-Cotes convergen a orden ≈ 2, sin importar su orden teórico:**
+**2. Los Newton-Cotes convergen a orden ≈ 2, sin importar su orden teórico:**
 
 | Método | Teórico | Malla ciega | Malla alineada |
 |---|---|---|---|
 | Trapecio | 2 | 1.97 | 2.00 |
-| Simpson 1/3 | 4 | 1.98 | exacto (suelo de redondeo) |
-| Simpson 3/8 | 4 | 2.06 | exacto (suelo de redondeo) |
-| Boole | 6 | 1.81 | exacto (suelo de redondeo) |
+| Simpson | 4 | 1.98 | exacto (suelo de redondeo) |
+| Newton-Cotes 3/8 | 4 | 2.06 | exacto (suelo de redondeo) |
 
 Los puntos de quiebre del envase (hombro, pie) rompen la hipótesis de suavidad de las
-cotas de error de orden alto. Alinear la malla con esos quiebres lleva a Simpson y Boole
-de orden 2 efectivo a **exactitud total**: la estructura de la malla importa más que el
-orden de la fórmula.
+cotas de error de orden alto. Alinear la malla con esos quiebres los lleva de orden 2
+efectivo a **exactitud total**: la estructura de la malla importa más que el orden de la
+fórmula. *(Medido en la versión extendida.)*
 
-**3. Gauss-Legendre global es el peor método sobre este problema.** Con m = 2 y m = 3
-nodos ni siquiera cumple el criterio del 5 % (5.12 % y 5.26 % de error), y su error no
-decrece monótonamente al añadir nodos. Es una regla global aplicada a una función
-quebrada: fuera de su régimen de validez. Aplicado **por tramos** pasa a ser el método
-más preciso del notebook — la corrección no está en cambiar de fórmula sino en respetar
-la estructura del problema.
+**3. La misma cuadratura de Gauss cambia 150× según dónde se aplique.** Global (un solo
+polinomio de grado 9 para todo el envase) da 0.49 % de error; con m = 2 o 3 nodos ni
+siquiera cumple el criterio del 5 %. Aplicada **por tramos** da 0.003 % y es el método más
+preciso, con 25 evaluaciones frente a 61. La corrección no está en cambiar de fórmula sino
+en respetar la estructura del problema.
 
 **4. El presupuesto de error lo domina la escala, no la cuadratura.** Como V ∝ r², un
 error relativo ε en la escala píxel→cm produce 2ε en el volumen:
@@ -146,7 +144,7 @@ error relativo ε en la escala píxel→cm produce 2ε en el volumen:
 | 2.5 % | 5.06 % | ✗ (frontera) |
 | 5 % | 10.25 % | ✗ |
 
-Un error de escala del 1 % pesa **41 veces más** que el peor Newton-Cotes y **196 veces
+Un error de escala del 1 % pesa **47 veces más** que el peor método y **615 veces
 más** que el mejor. Y el error del método se reduce gratis subiendo n (con n = 1200 el
 trapecio baja a 2.6e-5 %), mientras que mejorar la escala cuesta trabajo físico real.
 
@@ -154,8 +152,8 @@ trapecio baja a 2.6e-5 %), mientras que mejorar la escala cuesta trabajo físico
 
 | Aspecto | Decisión | Justificación |
 |---|---|---|
-| Método a producción | Trapecio o Simpson 1/3 sobre los datos crudos | Robustos ante aristas y ruido; el trapecio no tiene restricciones sobre n |
-| Estrategia de malla | Remuestrear a n múltiplo de 12; integrar por tramos si se detectan quiebres | Permite los cuatro métodos y recupera el orden teórico |
+| Método a producción | Trapecio o Simpson sobre los datos crudos | Robustos ante aristas y ruido; el trapecio no tiene restricciones sobre n |
+| Estrategia de malla | Remuestrear a n múltiplo de 6; integrar por tramos si se detectan quiebres | Permite los tres Newton-Cotes y recupera el orden teórico |
 | Gauss | Solo por tramos, nunca global | Global falla el 5 % con pocos nodos; por tramos exige detectar los quiebres del perfil |
 | Validación | Volumen **exterior** por desplazamiento de agua | Única cantidad comparable con una silueta |
 | Escala | ArUco + homografía, dos clics de respaldo | Error objetivo < 1 %, límite < 2.5 % |
