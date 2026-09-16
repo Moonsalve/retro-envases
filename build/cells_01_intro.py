@@ -61,7 +61,7 @@ numérico**. Todo lo que exceda ese piso en la fase de cámara vendrá de la ima
 | 7. Tabla comparativa | §7 Etapa 5 + §8 (reporte de Δz y parámetros) |
 | 8. Estudio de convergencia | §6 "Efecto de Δz y del número de puntos" |
 | 9. Gráficas | §8 "representación gráfica del perfil y de πr²" |
-| 10. Exportación | §8 "exportación de datos/resultados para el informe" |
+| 10. Resultados consolidados | §8 "posibilidad de copiar los datos/resultados" |
 | 11. Discusión de errores | §9 MVP "explicar las principales fuentes de error" |
 
 ---

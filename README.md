@@ -27,8 +27,8 @@ de error del 5 % queda disponible para la fase de cámara.
 
 | Notebook | Celdas | Para qué |
 |---|---|---|
-| **`Lab_RetroEnvases.ipynb`** | **16** | **El entregable.** Lo que exige el enunciado, directo al grano. |
-| `Lab_Integracion_Numerica_RetroEnvases_Fase1.ipynb` | 60 | Versión extendida: estudio de convergencia con dos mallas, barrido del orden de Gauss, pruebas de condiciones no satisfechas. Material de apoyo para el informe. |
+| **`Lab_RetroEnvases.ipynb`** | **16** | **El entregable.** Lo que exige el enunciado, directo al grano, y una celda final de texto con todos los resultados consolidados. |
+| `Lab_Integracion_Numerica_RetroEnvases_Fase1.ipynb` | 58 | Versión extendida: estudio de convergencia con dos mallas, barrido del orden de Gauss, pruebas de condiciones no satisfechas. Material de apoyo. |
 
 Ambos dan los mismos resultados; el largo los justifica con más experimentos.
 
@@ -188,7 +188,7 @@ y los requisitos de interfaz de la §8.
 retro-envases/
 ├── notebooks/
 │   ├── Lab_RetroEnvases.ipynb                             ← el entregable (16 celdas)
-│   └── Lab_Integracion_Numerica_RetroEnvases_Fase1.ipynb   versión extendida (60)
+│   └── Lab_Integracion_Numerica_RetroEnvases_Fase1.ipynb   versión extendida (58)
 ├── tests/
 │   └── verificar_formulas.py      verificación independiente, sin dependencias
 ├── build/                         generadores (las celdas viven en .py, no en JSON)
@@ -207,11 +207,17 @@ python3 build/construir_corto.py      # versión corta
 python3 build/construir_notebook.py   # versión extendida
 ```
 
-## Archivos que produce el notebook al ejecutarse
+## Salida
 
-| Archivo | Contenido |
-|---|---|
-| `perfil_datos.csv` | tabla (i, zᵢ, rᵢ, rᵢ², πrᵢ²) |
-| `comparacion_metodos.csv` | tabla comparativa con todos los parámetros |
-| `convergencia.csv` | barrido de error frente a Δz (solo versión extendida) |
-| `resumen_informe.md` | resumen en Markdown listo para el informe (solo versión extendida) |
+Los notebooks **no escriben archivos ni descargan nada**: todo queda a la vista en las
+celdas, listo para seleccionar y copiar.
+
+El notebook corto termina con una **celda de texto** que consolida todo lo que hace falta
+para el informe: datos del problema con Δz explícito, composición del envase por tramos,
+tabla comparativa completa de los seis métodos (integral, volumen, error absoluto, error
+relativo y porcentaje del margen), condiciones de aplicabilidad de cada método, tabla de
+sensibilidad al error de escala, inventario de fuentes de error, presupuesto de error para
+la fase 2 y el mapeo contra los artículos del enunciado.
+
+*(Esa celda refleja el envase por defecto; si editas `TRAMOS` los números cambian y los
+verás actualizados en las salidas de las celdas de cálculo.)*

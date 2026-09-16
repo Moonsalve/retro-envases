@@ -217,126 +217,17 @@ M(r"""**Cómo leer el resultado:**
 > precisión.""")
 
 M(r"""---
-## 10. Exportación de datos y resultados — §8 del PDF
+## 10. Resultados consolidados
 
-El enunciado pide *"exportación o posibilidad de copiar los datos/resultados para el
-informe"*.
+Todas las tablas de este notebook se pueden seleccionar y copiar directamente desde la
+salida de las celdas anteriores: la tabla de datos (Sección 4), la comparativa de métodos
+(Sección 7), los órdenes de convergencia (Sección 8) y la sensibilidad a la escala
+(Sección 9.1).
 
-**Qué hace esta celda:** genera cuatro archivos y los ofrece para descarga:
+*Este notebook no escribe archivos ni descarga nada: todo queda a la vista.*
 
-| Archivo | Contenido |
-|---|---|
-| `perfil_datos.csv` | la tabla $(i, z_i, r_i, r_i^2, \pi r_i^2)$ — §7 Etapa 4 |
-| `comparacion_metodos.csv` | la tabla comparativa completa — §7 Etapa 5 y 6 |
-| `convergencia.csv` | el barrido de errores frente a $\Delta z$ — §6 |
-| `resumen_informe.md` | un resumen en Markdown, listo para pegar |
-
-En Colab aparecerán en el panel de archivos (📁 a la izquierda) y se dispara la descarga
-automática. Fuera de Colab, se escriben en el directorio de trabajo.""")
-
-C(r'''import io, os, json
-
-def _a_markdown(df: pd.DataFrame, floatfmt: str = ".4f") -> str:
-    """DataFrame -> tabla Markdown, con respaldo si falta el paquete `tabulate`.
-
-    pandas.DataFrame.to_markdown() delega en `tabulate`, que no siempre está
-    instalado. En vez de dejar que la exportación falle por una dependencia
-    opcional, generamos la tabla a mano. El objetivo de esta celda es entregar
-    archivos al usuario; no puede caerse por un detalle de empaquetado.
-    """
-    try:
-        return df.to_markdown(index=False, floatfmt=floatfmt)
-    except (ImportError, AttributeError):
-        def _fmt(v):
-            if isinstance(v, float):
-                return f"{v:{floatfmt}}"
-            return str(v)
-        cabecera = "| " + " | ".join(str(c) for c in df.columns) + " |"
-        separador = "|" + "|".join("---" for _ in df.columns) + "|"
-        filas = ["| " + " | ".join(_fmt(v) for v in fila) + " |"
-                 for fila in df.itertuples(index=False, name=None)]
-        return "\n".join([cabecera, separador, *filas])
-
-
-ARCHIVOS: dict[str, str] = {}
-
-# --- 1. Tabla de datos del perfil --------------------------------------
-TABLA_BASE.to_csv("perfil_datos.csv", index=False, encoding="utf-8-sig")
-ARCHIVOS["perfil_datos.csv"] = f"{len(TABLA_BASE)} filas — tabla (z, r, r², πr²)"
-
-# --- 2. Comparación de métodos -----------------------------------------
-TABLA_COMP.to_csv("comparacion_metodos.csv", index=False, encoding="utf-8-sig")
-ARCHIVOS["comparacion_metodos.csv"] = f"{len(TABLA_COMP)} métodos con todos sus parámetros"
-
-# --- 3. Estudio de convergencia ----------------------------------------
-_conv = pd.concat([
-    CONV_CIEGA.assign(Malla="ciega"),
-    CONV_ALIN.rename(columns={"n_total": "n"}).assign(Malla="alineada"),
-], ignore_index=True)
-_conv.to_csv("convergencia.csv", index=False, encoding="utf-8-sig")
-ARCHIVOS["convergencia.csv"] = f"{len(_conv)} puntos de convergencia (ambas mallas)"
-
-# --- 4. Resumen en Markdown --------------------------------------------
-_buf = io.StringIO()
-_buf.write(f"# Resultados — {ENVASE.nombre}\n\n")
-_buf.write("## Parámetros del envase\n\n")
-_buf.write(f"- Intervalo de integración: [{ENVASE.a:.4f}, {ENVASE.b:.4f}] cm\n")
-_buf.write(f"- Altura total: {ENVASE.altura:.4f} cm\n")
-_buf.write(f"- Puntos de quiebre: {[round(float(q), 4) for q in quiebres]} cm\n")
-_buf.write(f"- Volumen exacto de referencia: **{V_EXACTO:.6f} cm³ = {V_EXACTO:.2f} mL**\n")
-_buf.write(f"- Integral exacta ∫r²dz: {I_EXACTA:.6f} cm³\n\n")
-_buf.write("### Composición por tramos\n\n")
-_buf.write(_a_markdown(ENVASE.resumen(), ".4f"))
-_buf.write("\n\n## Discretización\n\n")
-_buf.write(f"- n (subintervalos): {N_BASE}\n")
-_buf.write(f"- Puntos: {N_BASE + 1}\n")
-_buf.write(f"- **Δz = (b − a)/n = {DZ_BASE:.6f} cm**\n")
-_buf.write(f"- Malla uniforme; n múltiplo de 12 (compatible con los cuatro métodos)\n\n")
-_buf.write("## Comparación de métodos\n\n")
-_buf.write(_a_markdown(TABLA_COMP[["Método", "n", "Evals", "Δz [cm]",
-                                   "Orden / exactitud", "I = ∫r²dz [cm³]",
-                                   "V = πI [cm³]", "Err. abs. [cm³]",
-                                   "Err. rel. [%]", "Tiempo [ms]"]], ".6g"))
-_buf.write("\n\n## Órdenes de convergencia observados\n\n")
-_buf.write("| Método | Teórico | Malla ciega | Malla alineada |\n|---|---|---|---|\n")
-def _fmt_orden(v: float) -> str:
-    """NaN aquí significa 'exacto salvo redondeo', no 'no se pudo calcular'."""
-    return "exacto (suelo de redondeo)" if math.isnan(v) else f"{v:.2f}"
-
-for met, p_teo in TEORICO.items():
-    _buf.write(f"| {met} | {p_teo} | {_fmt_orden(orden_observado(CONV_CIEGA, met))} | "
-               f"{_fmt_orden(orden_observado(CONV_ALIN, met))} |\n")
-_buf.write("\n## Sensibilidad al error de escala\n\n")
-_buf.write(_a_markdown(SENS, ".4f"))
-_buf.write("\n")
-
-with open("resumen_informe.md", "w", encoding="utf-8") as fh:
-    fh.write(_buf.getvalue())
-ARCHIVOS["resumen_informe.md"] = "resumen en Markdown listo para el informe"
-
-# --- Reporte y descarga ------------------------------------------------
-print("=" * 74)
-print("ARCHIVOS GENERADOS")
-print("=" * 74)
-for nombre, desc in ARCHIVOS.items():
-    print(f"  ✓ {nombre:<28} {os.path.getsize(nombre):>8,} bytes   {desc}")
-print("=" * 74)
-
-try:
-    from google.colab import files as _colab_files
-    print("\nEntorno Colab detectado — iniciando descarga...")
-    for nombre in ARCHIVOS:
-        _colab_files.download(nombre)
-except ImportError:
-    print(f"\nFuera de Colab: los archivos están en {os.getcwd()}")''')
-
-M(r"""**Cómo leer el resultado:** las cuatro marcas ✓ con sus tamaños confirman la
-escritura. En Colab se dispara la descarga de cada archivo.
-
-`resumen_informe.md` está pensado para pegarse directamente en el documento del
-laboratorio: contiene los parámetros del envase, la discretización con $\Delta z$
-explícito, la tabla comparativa, los órdenes de convergencia y el análisis de
-sensibilidad, todo en tablas Markdown ya formateadas.""")
+Si prefieres el resumen ya consolidado en una sola celda de texto, está en el notebook
+corto (`Lab_RetroEnvases.ipynb`), en su celda final.""")
 
 M(r"""---
 ## 11. Fuentes de error y discusión — §9 MVP

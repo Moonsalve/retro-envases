@@ -470,24 +470,178 @@ error de escala del 1 %. El motor de cálculo está resuelto y le sobra precisi�
 
 **Lo que falta (fase 2):** capturar con la cámara, detectar el marcador de escala
 (ArUco + homografía), extraer el contorno del envase (Otsu y GrabCut), convertir a
-$(z_i, r_i)$ en cm, y montar la app en Streamlit. La integración ya no hay que tocarla.
-
----
-## 7. Exportar para el informe — §8""")
+$(z_i, r_i)$ en cm, y montar la app en Streamlit. La integración ya no hay que tocarla.""")
 
 # ============================================================ 16
-C(r'''TABLA.to_csv("perfil_datos.csv", index=False, encoding="utf-8-sig")
-RES.to_csv("comparacion_metodos.csv", index=False, encoding="utf-8-sig")
-print("✓ perfil_datos.csv        — tabla (i, z, r, r², πr²)")
-print("✓ comparacion_metodos.csv — los 5 métodos con todos sus parámetros")
+# ============================================================ RESUMEN FINAL
+M(r"""---
+# Resumen de resultados — para copiar al informe
 
-try:
-    from google.colab import files
-    files.download("perfil_datos.csv")
-    files.download("comparacion_metodos.csv")
-except ImportError:
-    import os
-    print(f"\n(fuera de Colab: guardados en {os.getcwd()})")''')
+*Todas las cifras de esta celda corresponden al envase definido por defecto. Si editas
+`TRAMOS`, los números cambian: los verás actualizados en las salidas de las celdas de
+arriba.*
+
+## 1. Datos del problema
+
+| Concepto | Valor |
+|---|---|
+| Envase | Botella PET, 600 mL nominales |
+| Intervalo de integración $[a,b]$ | $[0,\;21]$ cm |
+| Altura total | 21 cm |
+| Radio máximo | 3.40 cm |
+| Puntos de quiebre (aristas) | 1.0, 15.0, 18.5, 20.0 cm |
+| Subintervalos $n$ | 60 |
+| Puntos ($n+1$) | 61 |
+| **Diferencial $\Delta z = (b-a)/n$** | **0.350000 cm** |
+| Malla | uniforme; $n$ múltiplo de 12 |
+| **Volumen exacto de referencia** | **616.608244 cm³ = 616.61 mL** |
+| Integral exacta $\int r^2 dz$ | 196.272500 cm³ |
+| Margen del criterio del 5 % | ±30.83 cm³ |
+
+El volumen calculado es el **exterior** (superficie del envase), un **+2.8 %** sobre los
+600 mL de la etiqueta: la diferencia es el espesor de pared, el cuello macizo y la base
+cóncava. Por eso la validación será por **desplazamiento de agua**, no contra la etiqueta.
+
+## 2. Composición del envase por tramos
+
+| Tramo | z [cm] | r [cm] | Forma | V [cm³] | % del total |
+|---|---|---|---|---|---|
+| base (pie) | 0.0 – 1.0 | 2.50 → 3.40 | tronco de cono | 27.55 | 4.5 % |
+| **cuerpo cilíndrico** | 1.0 – 15.0 | 3.40 | cilindro | **508.44** | **82.5 %** |
+| hombro | 15.0 – 18.5 | 3.40 → 1.35 | tronco de cono | 65.87 | 10.7 % |
+| cuello | 18.5 – 20.0 | 1.35 | cilindro | 8.59 | 1.4 % |
+| boca / rosca | 20.0 – 21.0 | 1.35 → 1.45 | tronco de cono | 6.16 | 1.0 % |
+
+El cuerpo cilíndrico concentra el **82.5 %** del volumen: en la foto, medir bien el radio
+del cuerpo importa mucho más que medir bien el cuello. Un error de 1 mm en el radio del
+cuerpo cuesta ~18 cm³ (3 %); el mismo error en el cuello cuesta menos de 0.5 cm³.
+
+## 3. Comparación de los métodos
+
+Todos sobre la **misma tabla** de 61 puntos, $\Delta z = 0.35$ cm, $[a,b]=[0,21]$ cm.
+
+| Método | Evals | $\Delta z$ [cm] | Orden / exactitud | $I=\int r^2dz$ [cm³] | $V=\pi I$ [cm³] | Error abs [cm³] | Error rel [%] | % del margen |
+|---|---|---|---|---|---|---|---|---|
+| **Gauss por tramos, m=5** | 25 | — | grado ≤ 9 | 196.2661 | 616.5881 | 0.0201 | **0.0033** | 0.07 % |
+| Trapecio | 61 | 0.35 | $O(\Delta z^2)$ | 196.2524 | 616.5450 | 0.0632 | 0.0102 | 0.20 % |
+| Simpson 3/8 | 61 | 0.35 | $O(\Delta z^4)$ | 196.2500 | 616.5377 | 0.0705 | 0.0114 | 0.23 % |
+| Simpson 1/3 | 61 | 0.35 | $O(\Delta z^4)$ | 196.3562 | 616.8713 | 0.2631 | 0.0427 | 0.85 % |
+| Boole | 61 | 0.35 | $O(\Delta z^6)$ | 196.3682 | 616.9088 | 0.3005 | 0.0487 | 0.97 % |
+| Gauss global, m=5 | 5 | — | grado ≤ 9 | 197.2297 | 619.6153 | 3.0070 | 0.4877 | 9.75 % |
+
+**Los seis métodos cumplen el criterio del 5 % con holgura:** el peor consume menos del
+10 % del margen permitido y los Newton-Cotes menos del 1 %.
+
+### Dos resultados que contradicen la intuición
+
+**(a) Entre los Newton-Cotes el ranking sale invertido respecto al orden teórico.**
+El trapecio ($O(\Delta z^2)$) resulta **4.8 veces más preciso** que Boole
+($O(\Delta z^6)$). Las cotas de error de orden alto suponen que el integrando es suave,
+y el envase tiene aristas en el pie y el hombro donde las derivadas de orden alto no
+existen. Los bloques de Boole son los más anchos (4 subintervalos), cruzan más aristas y
+acumulan más error. **Un método de orden alto solo rinde si el integrando cumple sus
+hipótesis de suavidad.**
+
+**(b) La misma fórmula de Gauss, con los mismos 5 nodos, cambia 150× según dónde se
+aplique.** Global (un polinomio de grado 9 para todo el envase) da 0.49 % de error y es
+el peor método. Aplicada por tramos —una cuadratura en cada tramo, donde $f=r^2$ es un
+polinomio de grado 2— da 0.003 % y es el mejor, con solo 25 evaluaciones frente a 61.
+El residuo de 0.003 % no viene de la cuadratura sino del **spline**, que redondea
+ligeramente las aristas al interpolar.
+
+> **Conclusión sobre los métodos:** lo que decide la precisión no es el orden de la
+> fórmula, sino **si se aplica respetando la estructura del problema**. Partir el
+> intervalo en los quiebres valió más que cualquier salto de orden.
+
+## 4. Condiciones de aplicabilidad
+
+| Método | Requiere | Si no se cumple |
+|---|---|---|
+| Trapecio | nada | siempre aplicable — es el respaldo universal |
+| Simpson 1/3 | $n$ par | usar $n\pm1$, o 3/8 en los últimos 3 subintervalos |
+| Simpson 3/8 | $n$ múltiplo de 3 | usar el múltiplo de 3 más cercano |
+| Boole | $n$ múltiplo de 4 | usar el múltiplo de 4 más cercano |
+| Todos (Newton-Cotes) | malla uniforme | remuestrear por interpolación |
+| Gauss | poder evaluar entre los datos | interpolar (spline) |
+
+Con $n$ múltiplo de $\text{mcm}(2,3,4)=12$ los cuatro métodos son aplicables a la vez.
+En la fase de cámara $n$ vendrá impuesto por la altura en píxeles del envase, así que
+habrá que **remuestrear a un $n$ múltiplo de 12** antes de integrar.
+
+## 5. Sensibilidad al error de escala — lo que decide el proyecto
+
+Como $V \propto r^2$, un error relativo $\varepsilon$ en la escala píxel→cm produce
+$2\varepsilon$ en el volumen: $\;\Delta V/V = 2\,\Delta r/r$.
+
+| Error de escala | V estimado [cm³] | Error en V | ¿Pasa el 5 %? |
+|---|---|---|---|
+| 0.5 % | 622.73 | +0.99 % | ✅ |
+| 1.0 % | 628.94 | +2.00 % | ✅ |
+| 2.0 % | 641.45 | +4.03 % | ✅ |
+| **2.5 %** | 647.76 | **+5.05 %** | ❌ **frontera** |
+| 5.0 % | 679.74 | +10.24 % | ❌ |
+
+**Un error de escala del 1 % pesa 41 veces más que el peor método numérico** (0.049 %).
+
+Y hay una asimetría que lo decide todo: el error del método **se reduce gratis** subiendo
+$n$ —$1.0\times10^{-2}$ % con $n$=60, $2.6\times10^{-3}$ % con $n$=240,
+$2.6\times10^{-5}$ % con $n$=1200— mientras que mejorar la escala exige trabajo físico
+real (imprimir y medir el marcador, montar la escena, controlar la perspectiva).
+**La fuente de error barata de eliminar no es la que domina.**
+
+## 6. Fuentes de error, por lo que realmente pesan
+
+| Fuente | Magnitud | Estado |
+|---|---|---|
+| Calibración de escala px→cm | 2× el error de escala | ❌ fase 2 |
+| Perspectiva de la fotografía | ~2·(R/distancia) | ❌ fase 2 |
+| Extracción del contorno | 1–3 px por borde | ❌ fase 2 |
+| Asimetría del envase | 0–5 % | ❌ fase 2 |
+| Elección del método | ~0.05 % | ✅ medido |
+| Discretización ($\Delta z$) | ~0.01 %, y baja con $n$ | ✅ medido |
+
+Las dos fuentes numéricas son **despreciables**: entre 40 y 200 veces menores que un
+error de escala del 1 %. **El motor de cálculo está resuelto y le sobra precisión.**
+
+## 7. Presupuesto de error para la fase 2
+
+| Parámetro | Objetivo | Límite |
+|---|---|---|
+| Error de escala px→cm | < 1 % | < 2.5 % |
+| Error resultante en el volumen | < 2 % | < 5 % |
+
+**Decisiones que se derivan de estos números:**
+
+- **Método a producción:** trapecio o Simpson 1/3 sobre los datos crudos. Son robustos
+  ante aristas y ruido, y el trapecio no impone condiciones sobre $n$.
+- **Gauss:** solo por tramos, nunca global. Requiere detectar antes los quiebres del
+  perfil.
+- **Malla:** remuestrear a $n$ múltiplo de 12; subir $n$ es gratis, así que conviene
+  usar toda la resolución que dé la foto.
+- **Validación:** volumen exterior por desplazamiento de agua.
+- **Escala:** marcador ArUco + homografía, con dos clics manuales de respaldo. Verificar
+  con regla el tamaño impreso del marcador: las impresoras escalan sin avisar, y un 3 %
+  de error ahí se convierte en 6 % en el volumen.
+- **Captura:** cámara lejos y con zoom, para aproximar la proyección ortográfica que
+  supone el modelo.
+
+## 8. Cobertura del enunciado
+
+| Requisito del PDF | Dónde |
+|---|---|
+| §5 Contexto matemático — $V=\pi\int r^2dz$ | encabezado |
+| §6 Trapecio, Simpson, Gauss, Newton-Cotes | sección 3 |
+| §6 Efecto de $\Delta z$ y del nº de puntos | secciones 4 y 6 |
+| §7 Etapa 4 — tabla $(z_i, r_i, r_i^2, \pi r_i^2)$ | sección 2 |
+| §7 Etapa 5 — parámetros de cada método | sección 4 |
+| §7 Etapa 6 — diferencia absoluta y error relativo | sección 4 |
+| §8 Reporte explícito de $\Delta z$ | secciones 2 y 4 |
+| §8 Mensajes ante condiciones no cumplidas | sección 3 |
+| §8 Gráfica del perfil y de $\pi r^2$ | sección 5 |
+| §9 MVP — explicar las fuentes de error | sección 6 |
+
+Pendiente para la fase 2: §7 Etapas 2 y 3 (captura, escalamiento, extracción del perfil)
+y los requisitos de interfaz de la §8.""")
 
 # ------------------------------------------------------------------ build
 def a_fuente(t):
