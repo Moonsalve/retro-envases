@@ -25,16 +25,31 @@ from retroenvases.sintetico import BOTELLA_600, Escena, generar_perspectiva, vol
 st.set_page_config(page_title="Del píxel al volumen", page_icon="🧴", layout="wide")
 
 LIMITE = 5.0      # criterio del reto: error relativo máximo [%]
-DESCARGAS = pathlib.Path.home() / "Downloads"
+INICIO = pathlib.Path.home()
+CARPETAS = {
+    "Descargas": INICIO / "Downloads",
+    "Escritorio": INICIO / "Desktop",
+    "Imágenes": INICIO / "Pictures",
+    "Documentos": INICIO / "Documents",
+}
+OTRA_CARPETA = "Otra carpeta…"
 EXTENSIONES = {".jpg", ".jpeg", ".png", ".webp"}
 
 
-def _fotos_en_descargas(maximo: int = 30) -> list[pathlib.Path]:
-    """Imágenes de ~/Downloads, de la más reciente a la más antigua."""
-    if not DESCARGAS.is_dir():
+def _fotos_en(carpeta: pathlib.Path, maximo: int = 60) -> list[pathlib.Path]:
+    """Imágenes de una carpeta (sin subcarpetas), de la más reciente a la más antigua."""
+    try:
+        fotos = [f for f in carpeta.iterdir()
+                 if f.suffix.lower() in EXTENSIONES and f.is_file()]
+    except OSError:                       # sin permiso de lectura, carpeta que desaparece…
         return []
-    fotos = [f for f in DESCARGAS.iterdir() if f.suffix.lower() in EXTENSIONES and f.is_file()]
     return sorted(fotos, key=lambda f: f.stat().st_mtime, reverse=True)[:maximo]
+
+
+def _ruta_escrita(texto: str) -> pathlib.Path:
+    """Normaliza una ruta pegada: comillas, espacios escapados (\\ ) y ~."""
+    t = texto.strip().strip("'\"").replace("\\ ", " ")
+    return pathlib.Path(t).expanduser()
 
 
 # ─────────────────────────────────────────────────────────── utilidades ──
@@ -132,24 +147,45 @@ with st.sidebar:
 
 # 1 ── foto ────────────────────────────────────────────────────────────────
 st.subheader("1. La foto")
-fuente = st.radio("Origen", ["Foto de Descargas", "Otro archivo", "Ejemplo sintético"],
+fuente = st.radio("Origen", ["Foto de una carpeta", "Subir archivo", "Ejemplo sintético"],
                   horizontal=True)
-datos, verdad = None, None
-if fuente == "Foto de Descargas":
-    fotos = _fotos_en_descargas()
-    if not fotos:
-        st.warning(f"No hay imágenes (.jpg, .png, .webp) en {DESCARGAS}.")
+datos, verdad, nombre_foto = None, None, None
+if fuente == "Foto de una carpeta":
+    c_carp, c_ruta = st.columns([1, 2])
+    opcion = c_carp.selectbox("Carpeta", [*CARPETAS, OTRA_CARPETA])
+    if opcion == OTRA_CARPETA:
+        texto = c_ruta.text_input(
+            "Ruta de la carpeta", placeholder="/Users/tu_usuario/Fotos/envases",
+            help="En Finder: clic derecho sobre la carpeta con la tecla Opción presionada "
+                 "→ «Copiar … como ruta», y pégala aquí.")
+        carpeta = _ruta_escrita(texto) if texto.strip() else None
     else:
-        elegida = st.selectbox(
-            "Foto (la más reciente primero)", fotos,
-            format_func=lambda f: f"{f.name}  ·  "
-                                  f"{time.strftime('%d/%m %H:%M', time.localtime(f.stat().st_mtime))}")
-        datos = elegida.read_bytes()
-elif fuente == "Otro archivo":
+        carpeta = CARPETAS[opcion]
+        c_ruta.text_input("Ruta de la carpeta", str(carpeta), disabled=True)
+    if carpeta is None:
+        st.info("Escribe la ruta de la carpeta donde está la foto.")
+    elif not carpeta.is_dir():
+        st.error(f"No existe la carpeta **{carpeta}**.")
+    else:
+        fotos = _fotos_en(carpeta)
+        if not fotos:
+            st.warning(f"No hay imágenes (.jpg, .png, .webp) en **{carpeta}**. "
+                       "Si la carpeta sí tiene fotos, puede que macOS no le haya dado "
+                       "permiso de lectura a la terminal (Ajustes → Privacidad y seguridad "
+                       "→ Archivos y carpetas).")
+        else:
+            elegida = st.selectbox(
+                f"Foto ({len(fotos)} en la carpeta, la más reciente primero)", fotos,
+                format_func=lambda f: f"{f.name}  ·  "
+                                      f"{time.strftime('%d/%m %H:%M', time.localtime(f.stat().st_mtime))}")
+            datos, nombre_foto = elegida.read_bytes(), elegida.name
+elif fuente == "Subir archivo":
     arch = st.file_uploader("Foto del envase", type=["jpg", "jpeg", "png", "webp"])
-    datos = arch.getvalue() if arch else None
+    if arch:
+        datos, nombre_foto = arch.getvalue(), arch.name
 else:
     datos, verdad = _ejemplo()
+    nombre_foto = "ejemplo sintético"
     st.info(f"Botella sintética de volumen exacto **{verdad['volumen_cm3']:.2f} cm³**, "
             f"fotografiada con una cámara a {verdad['distancia_cm']:.0f} cm. "
             "Sirve para comprobar que todo funciona.")
@@ -162,22 +198,29 @@ H_img, W_img = foto.bgr.shape[:2]
 # Los datos que dependen de la foto (altura, focal, referencia) llevan una clave
 # ligada a ella: al cambiar de foto vuelven a su valor inicial en vez de arrastrar
 # los de la anterior.
-clave = str(hash(datos))
+clave = str(hash((nombre_foto, datos)))
 
-# 2 ── escala y selección ───────────────────────────────────────────────────
-col_izq, col_der = st.columns([1, 1])
-with col_izq:
-    st.subheader("2. Escala")
-    altura = st.number_input(
-        "Altura real del envase [cm]", 1.0, 80.0,
-        float(verdad["altura_cm"]) if verdad else 20.0, step=0.05, format="%.2f",
-        key=f"altura_{clave}",
-        help="Es la única referencia de escala. Su error se multiplica ×3 en el volumen: "
-             "1 mm de error en una lata de 12 cm son 2.5 %.")
+st.subheader("2. Altura del envase")
+altura = st.number_input(
+    f"¿Cuánto mide de alto el envase de «{nombre_foto}»? [cm]",
+    min_value=1.0, max_value=80.0,
+    value=float(verdad["altura_cm"]) if verdad else None,
+    step=0.05, format="%.2f", placeholder="Mídelo con una regla, p. ej. 24.35",
+    key=f"altura_{clave}",
+    help="Desde la base hasta el punto más alto, tapa incluida. Es la única referencia "
+         "de escala: su error se multiplica ×3 en el volumen (1 mm de error en una lata "
+         "de 12 cm son 2.5 %).")
+if altura is None:
+    st.warning("📏 **Escribe la altura real del envase** para poder calcular el volumen. "
+               "Mídela con una regla, al medio milímetro.")
+else:
     st.caption("La escala se obtiene de esta altura: los píxeles que mide la silueta "
                "corresponden a estos centímetros. Supuesto: el envase es un sólido de "
                "revolución con su eje vertical.")
 
+# 2 ── escala y selección ───────────────────────────────────────────────────
+col_izq, col_der = st.columns([1, 1])
+with col_izq:
     st.subheader("3. Selección del envase")
     metodo = st.radio("Segmentación", ["GrabCut con rectángulo (recomendado)",
                                        "GrabCut automático", "Otsu (solo fondo liso)"])
@@ -221,7 +264,9 @@ with col_der:
     st.image(_con_rectangulo(foto.bgr, rect), caption=f"Foto de trabajo · {W_img}×{H_img} px",
              width="stretch")
 
-calcular = st.button("Calcular volumen", type="primary", width="stretch")
+calcular = st.button("Calcular volumen", type="primary", width="stretch",
+                     disabled=altura is None,
+                     help="Escribe primero la altura del envase." if altura is None else None)
 if calcular:
     seg = "otsu" if metodo.startswith("Otsu") else "grabcut"
     try:

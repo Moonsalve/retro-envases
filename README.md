@@ -323,14 +323,17 @@ cd ~/Developer/retro-envases
 .venv/bin/streamlit run app/streamlit_app.py
 ```
 
-Se abre en `http://localhost:8501`. Funciona solo en local, con fotos ya descargadas.
+Se abre en `http://localhost:8501`. Funciona solo en local, con fotos ya guardadas en el
+computador.
 
 Flujo, que sigue las etapas del enunciado:
 
-1. **Foto**: se elige de `~/Downloads` (la más reciente aparece primero), se sube otro
+1. **Foto**: se elige de una carpeta (Descargas, Escritorio, Imágenes, Documentos o
+   cualquier ruta que se escriba; la foto más reciente aparece primero), se sube un
    archivo, o se usa un **ejemplo sintético** de volumen exacto para comprobar que todo
    funciona.
-2. **Escala**: la altura real del envase, medida con regla.
+2. **Altura del envase**: la app la pide apenas se elige la foto, **sin valor por
+   defecto**, y no deja calcular hasta que se escribe. Es la única referencia de escala.
 3. **Selección del envase**: GrabCut con un rectángulo ajustable (recomendado), GrabCut
    automático u Otsu (solo con fondo liso).
 4. **Perspectiva**: focal leída del EXIF si la foto la trae. Una foto que llegó por
@@ -351,7 +354,10 @@ Flujo, que sigue las etapas del enunciado:
   (> 5 %: el contorno incluyó fondo), si el contorno toca el rectángulo (el rectángulo
   corta el envase) o si la cámara estaba a menos de 25 cm.
 - Altura, focal, inclinación, referencia y rectángulo se **reinician al cambiar de
-  foto**: antes arrastraban los valores de la anterior.
+  foto** (aunque sea la misma imagen en otra carpeta): antes arrastraban los valores de
+  la anterior.
+- **Sin altura no hay cálculo**: antes venía precargada en 20 cm, y la app calculaba con
+  un número que nadie había medido.
 - GrabCut con **semilla fija**: la misma foto da siempre el mismo volumen.
 
 Verificado con `streamlit.testing` (AppTest): el ejemplo sintético da **0.40 %** de
