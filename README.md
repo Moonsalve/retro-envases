@@ -3,8 +3,11 @@
 Estimación del volumen de envases mediante visión por cámara, sólidos de revolución e
 integración numérica.
 
-**Estado: Fase 1 completa** — motor de integración numérica validado.
-La fase de cámara (extracción del perfil desde una foto) aún no está implementada.
+**Estado:**
+- **Fase 1 completa** — motor de integración numérica validado contra un volumen exacto.
+- **Fase 2 en curso** — pipeline de visión (foto → perfil → volumen) implementado y
+  validado con fotos sintéticas: 180/180 corridas dentro del 5 %, error medio 0.10–0.14 %.
+  Falta: modelar perspectiva, probar con fotos reales y la app en Streamlit.
 
 ---
 
@@ -135,17 +138,25 @@ siquiera cumple el criterio del 5 %. Aplicada **por tramos** da 0.003 % y es el 
 preciso, con 25 evaluaciones frente a 61. La corrección no está en cambiar de fórmula sino
 en respetar la estructura del problema.
 
-**4. El presupuesto de error lo domina la escala, no la cuadratura.** Como V ∝ r², un
-error relativo ε en la escala píxel→cm produce 2ε en el volumen:
+**4. El presupuesto de error lo domina la escala, no la cuadratura.** La escala
+píxel→cm convierte a la vez radios y alturas, así que V ∝ s³ y un error relativo ε en la
+escala produce **≈ 3ε** en el volumen. (Un error solo en el borde del contorno afecta
+únicamente al radio y produce 2ε.)
 
 | Error de escala | Error en el volumen | ¿Pasa el 5 %? |
 |---|---|---|
-| 1 % | 2.01 % | ✓ |
-| 2.5 % | 5.06 % | ✗ (frontera) |
-| 5 % | 10.25 % | ✗ |
+| 0.5 % | 1.50 % | ✓ |
+| 1.0 % | 3.02 % | ✓ |
+| 1.64 % | 5.00 % | frontera |
+| 2.0 % | 6.11 % | ✗ |
 
-Un error de escala del 1 % pesa **47 veces más** que el peor método y **615 veces
-más** que el mejor. Y el error del método se reduce gratis subiendo n (con n = 1200 el
+Un error de escala del 1 % pesa **71 veces más** que el peor método. Y el error del método
+se reduce gratis subiendo n (con n = 1200 el trapecio baja a 2.6e-5 %), mientras que
+mejorar la escala cuesta trabajo físico real.
+
+*Corrección respecto a una versión anterior de este README, que decía ×2 y un límite de
+2.5 %: aquella simulación escalaba solo los radios. El factor correcto para un error de
+escala es ×3, verificado con el pipeline completo.* Y el error del método se reduce gratis subiendo n (con n = 1200 el
 trapecio baja a 2.6e-5 %), mientras que mejorar la escala cuesta trabajo físico real.
 
 ## Decisiones de diseño para la fase 2
@@ -155,10 +166,70 @@ trapecio baja a 2.6e-5 %), mientras que mejorar la escala cuesta trabajo físico
 | Método a producción | Trapecio o Simpson sobre los datos crudos | Robustos ante aristas y ruido; el trapecio no tiene restricciones sobre n |
 | Estrategia de malla | Remuestrear a n múltiplo de 6; integrar por tramos si se detectan quiebres | Permite los tres Newton-Cotes y recupera el orden teórico |
 | Gauss | Solo por tramos, nunca global | Global falla el 5 % con pocos nodos; por tramos exige detectar los quiebres del perfil |
-| Validación | Volumen **exterior** por desplazamiento de agua | Única cantidad comparable con una silueta |
-| Escala | ArUco + homografía, dos clics de respaldo | Error objetivo < 1 %, límite < 2.5 % |
+| Validación | Fotos sintéticas de volumen exacto + un envase de geometría conocida (lata) medido con regla | Sin impresora ni medición con agua; el PDF admite "recipiente de geometría conocida" |
+| Escala | Altura real del envase medida con regla, al medio milímetro | Está sobre el eje: sin problema de coplanaridad. Error objetivo < 0.5 %, límite < 1.64 % |
 | Segmentación | Otsu/Canny **y** GrabCut, comparados | Cubre el requisito de la Etapa 1 de investigar dos estrategias |
 | Aplicación | Streamlit en Streamlit Cloud | `st.camera_input()` funciona en el celular; HTTPS gratis |
+
+---
+
+# Fase 2 — De la foto al perfil
+
+Paquete `retroenvases/`:
+
+| Módulo | Qué hace |
+|---|---|
+| `integracion.py` | Los 4 métodos (Trapecio, Simpson, Newton-Cotes 3/8, Gauss), el remuestreo a malla uniforme y `calcular_todos()` |
+| `vision.py` | Corrección de iluminación, segmentación **Otsu** y **GrabCut**, enderezado del eje, bordes subpíxel y escala por la altura |
+| `pipeline.py` | `estimar_volumen(foto, altura_cm, segmentador)`: la cadena completa |
+| `sintetico.py` | Fotos sintéticas de envases con volumen exacto conocido |
+
+## La cadena
+
+```
+foto ─► corrección de iluminación ─► segmentación (Otsu | GrabCut) ─► limpieza
+     ─► enderezado del eje ─► bordes subpíxel ─► escala = altura_px / altura_cm
+     ─► remuestreo a n múltiplo de 6 ─► 4 métodos de integración ─► volumen
+```
+
+**Decisiones que resultaron clave** (cada una corrigió un fallo medido en el banco):
+
+1. **Corregir la iluminación antes de segmentar.** Se ajusta una superficie cuadrática por
+   canal sobre el marco exterior de la foto (fondo puro, porque el envase no toca los
+   bordes) y se resta. Sin esto, con un degradé de luz, ningún umbral global separa el
+   envase: el error era +93 %.
+2. **Umbralizar la distancia de color al fondo, no el gris.** No hay que adivinar si el
+   envase es más claro u oscuro que el fondo. El umbral de Otsu se acota con el ruido del
+   fondo (media + 6σ), porque Otsu falla cuando parte del envase se confunde con el fondo.
+3. **Convexidad por filas.** La silueta de un sólido de revolución corta cada fila
+   horizontal en un solo intervalo; rellenar cada fila entre sus extremos cierra cualquier
+   hueco interior. Es el modelo físico, no un parche.
+4. **Bordes subpíxel.** En RGB la distancia de un píxel de borde al fondo es lineal en su
+   fracción de cobertura, así que el borde real está donde esa distancia cruza la mitad
+   de su salto. Bajó el error del caso base de +2.3 % a −0.04 %.
+
+## Banco de pruebas
+
+```bash
+python -m tests.banco_vision
+```
+
+3 envases (botella, lata, vaso cónico) × 10 escenas × 3 semillas × 2 segmentadores = 180
+corridas contra el volumen exacto:
+
+| | Otsu | GrabCut |
+|---|---|---|
+| Error medio \|ε\| | 0.14 % | 0.10 % |
+| Peor caso | 1.67 % | 1.13 % |
+| Dentro del 5 % | 100 % | 100 % |
+| Tiempo por foto | ~95 ms | ~224 ms |
+
+El peor caso en ambos es el "combo difícil" (envase claro sobre fondo claro, degradé,
+inclinación y ruido juntos).
+
+**Límite de esta validación:** las fotos sintéticas son proyección **ortográfica**. Una
+foto real tiene perspectiva, que agranda la parte del envase más cercana a la cámara.
+Es la principal fuente de error que falta cuantificar.
 
 ## Cobertura del enunciado
 

@@ -33,13 +33,17 @@ foto, esa integral hay que aproximarla numéricamente.
 
 ## Lo que importa entender antes de empezar
 
-El radio entra **al cuadrado**, así que un error relativo $\varepsilon$ al medir el radio
-se convierte en $2\varepsilon$ en el volumen:
+El volumen es muy sensible a los errores de medición, y hay que distinguir dos tipos:
 
-$$\frac{\Delta V}{V} = 2\,\frac{\Delta r}{r}$$
+- **Error en el borde del contorno** (afecta solo al radio). Como el radio entra al
+  cuadrado: $\;\Delta V/V = 2\,\Delta r/r$.
+- **Error en la escala píxel→cm** (afecta al radio **y** a la altura a la vez, porque
+  ambos se convierten con la misma escala). Entonces $V \propto s^3$:
 
-Con el criterio del 5 % del reto, eso significa que **la escala píxel→cm debe tener menos
-del 2.5 % de error**. Ahí se gana o se pierde el reto, no en elegir el método.
+$$\frac{\Delta V}{V} \approx 3\,\frac{\Delta s}{s}$$
+
+Con el criterio del 5 % del reto, **la escala debe tener menos del 1.6 % de error**
+($1.05^{1/3}-1$). Ahí se gana o se pierde el reto, no en elegir el método.
 
 *Ejecuta las celdas en orden (`Ctrl+F9`). No hay que instalar nada.*""")
 
@@ -129,9 +133,9 @@ display(pd.DataFrame(
 # ═════════════════════════════════════════════════════ CELDA 5 (texto)
 M(r"""**Nota sobre qué volumen es este.** El perfil describe la superficie **exterior**, así
 que el resultado (~617 cm³) es el **volumen exterior**, no la capacidad de 600 mL de la
-etiqueta. Por eso la validación del proyecto será por **desplazamiento de agua**: es lo
-único comparable con lo que se ve en una silueta. Comparar contra la etiqueta arrancaría
-con ~3 % de error regalado, sobre un margen de 5 %.
+etiqueta. Esa diferencia (~3 %) es pared, cuello macizo y base cóncava: una silueta no
+puede verla. Si la prueba de campo compara contra la etiqueta, hará falta estimar el
+espesor de pared para pasar de volumen exterior a capacidad.
 
 Observa también que el **cuerpo cilíndrico aporta el 82 %** del volumen: en la foto, medir
 bien el radio del cuerpo importa mucho más que medir bien el cuello.
@@ -499,13 +503,14 @@ magnitud de margen sobrante.
 
 La celda siguiente compara las dos fuentes de error que competirán en el proyecto real: el
 **método numérico** (que acabamos de medir) y la **escala píxel→cm** (que aparecerá al
-usar la cámara). Se simula un error de calibración multiplicando todos los radios por
-$(1+s)$.""")
+usar la cámara). Se simula un error de calibración $s$: como la escala convierte **tanto
+los radios como las alturas**, ambos se multiplican por $(1+s)$.""")
 
 # ═════════════════════════════════════════════════════ CELDA 14 (código)
 C(r'''filas = []
-for s in [0.005, 0.01, 0.02, 0.025, 0.05]:
-    V_s = math.pi * trapecio(Z, (1 + s) * R)     # radios escalados por (1+s)
+for s in [0.005, 0.01, 0.015, 0.02, 0.03]:
+    # Un error de escala afecta a z y a r a la vez → el volumen escala como (1+s)³
+    V_s = math.pi * trapecio((1 + s) * Z, (1 + s) * R)
     rel = 100 * (V_s - V_EXACTO) / V_EXACTO
     filas.append({"Error de escala [%]": 100*s, "V estimado [cm³]": V_s,
                   "Error en V [%]": rel,
@@ -513,10 +518,11 @@ for s in [0.005, 0.01, 0.02, 0.025, 0.05]:
 display(pd.DataFrame(filas))
 
 peor = RES["Error rel [%]"].max()
-esc1 = 100 * (1.01**2 - 1)                        # error en V si la escala falla un 1 %
+esc1 = 100 * (1.01**3 - 1)                        # error en V si la escala falla un 1 %
 print(f"Error del PEOR método (n={N})            : {peor:.4f} %")
 print(f"Error por una escala mal calibrada al 1 % : {esc1:.4f} %")
 print(f"\n→ Un error de escala del 1 % pesa {esc1/peor:.0f}× más que el peor método.")
+print(f"→ Límite de escala para el 5 %: {100*(1.05**(1/3)-1):.2f} %")
 print(f"→ Y el error del método baja gratis subiendo n:")
 for n in (60, 240, 1200):
     z2 = np.linspace(A, B, n + 1)
@@ -526,23 +532,24 @@ for n in (60, 240, 1200):
 # ═════════════════════════════════════════════════════ CELDA 15 (texto)
 M(r"""**Conclusión — lo que este notebook deja fijado para la fase de cámara.**
 
-El error en el volumen es **el doble** del error en la escala. De ahí salen los números
-que dirigen todo el proyecto:
+El error en el volumen es **el triple** del error en la escala, porque la escala convierte
+a la vez radios y alturas. De ahí salen los números que dirigen todo el proyecto:
 
 | Error de escala px→cm | Error en el volumen | |
 |---|---|---|
-| 1 % | 2.0 % | ✅ objetivo |
-| 2.5 % | 5.1 % | ⚠️ frontera |
-| 5 % | 10.3 % | ❌ |
+| 0.5 % | 1.5 % | ✅ objetivo |
+| 1.0 % | 3.0 % | ✅ |
+| 1.6 % | 5.0 % | ⚠️ frontera |
+| 2.0 % | 6.1 % | ❌ |
 
 Y hay una asimetría que lo decide todo: **el error del método se reduce gratis** subiendo
-$n$, mientras que mejorar la escala exige trabajo físico real (imprimir y medir el
-marcador, montar la escena, controlar la perspectiva). La fuente de error barata de
+$n$, mientras que mejorar la escala exige trabajo físico real (medir bien la referencia,
+controlar la perspectiva). La fuente de error barata de
 eliminar no es la que domina.
 
-**Lo que falta (fase 2):** capturar con la cámara, detectar el marcador de escala
-(ArUco + homografía), extraer el contorno del envase (Otsu y GrabCut), convertir a
-$(z_i, r_i)$ en cm, y montar la app en Streamlit. La integración ya no hay que tocarla.""")
+**Lo que falta (fase 2):** capturar con la cámara, fijar la escala con la altura real del
+envase medida con regla, extraer el contorno (Otsu y GrabCut), convertir a $(z_i, r_i)$
+en cm, y montar la app en Streamlit. La integración ya no hay que tocarla.""")
 
 # ═════════════════════════════════════════════════════ CELDA 16 (texto, resumen)
 M(r"""---
@@ -569,8 +576,8 @@ números cambian: los verás actualizados en las salidas de las celdas de arriba
 | Margen del criterio del 5 % | ±30.83 cm³ |
 
 El volumen calculado es el **exterior**, un **+2.8 %** sobre los 600 mL de la etiqueta: la
-diferencia es el espesor de pared, el cuello macizo y la base cóncava. Por eso la
-validación será por **desplazamiento de agua**, no contra la etiqueta.
+diferencia es el espesor de pared, el cuello macizo y la base cóncava, que una silueta no
+puede ver.
 
 ## 2. Composición del envase por tramos
 
@@ -632,17 +639,24 @@ que **remuestrear a un $n$ múltiplo de 6** antes de integrar.
 
 ## 5. Sensibilidad al error de escala — lo que decide el proyecto
 
-Como $V \propto r^2$: $\;\Delta V/V = 2\,\Delta r/r$.
+La escala convierte radios **y** alturas, así que $V \propto s^3$ y
+$\;\Delta V/V \approx 3\,\Delta s/s$. (Un error solo en el borde del contorno afecta
+únicamente al radio: $\Delta V/V = 2\,\Delta r/r$.)
 
 | Error de escala | V estimado [cm³] | Error en V | ¿Pasa el 5 %? |
 |---|---|---|---|
-| 0.5 % | 622.73 | +0.99 % | ✅ |
-| 1.0 % | 628.94 | +2.00 % | ✅ |
-| 2.0 % | 641.45 | +4.03 % | ✅ |
-| **2.5 %** | 647.76 | **+5.05 %** | ❌ **frontera** |
-| 5.0 % | 679.74 | +10.24 % | ❌ |
+| 0.5 % | 625.84 | +1.50 % | ✅ |
+| 1.0 % | 635.23 | +3.02 % | ✅ |
+| 1.5 % | 644.71 | +4.56 % | ✅ |
+| **2.0 %** | 654.28 | **+6.11 %** | ❌ |
+| 3.0 % | 673.72 | +9.26 % | ❌ |
 
-**Un error de escala del 1 % pesa 47 veces más que el peor método numérico.**
+**Límite de escala para el 5 %: $1.05^{1/3}-1 = 1.64\,\%$.**
+**Un error de escala del 1 % pesa 71 veces más que el peor método numérico.**
+
+Con la escala tomada de la altura del envase medida con regla, 1 mm de error de lectura
+es 0.48 % de escala en una botella de 21 cm (1.4 % de volumen) y 0.82 % en una lata de
+12 cm (2.5 % de volumen). **Hay que medir la altura con cuidado, al medio milímetro.**
 
 El error del método se reduce gratis subiendo $n$ — $1.0\times10^{-2}$ % con $n$=60,
 $2.6\times10^{-3}$ % con $n$=240, $2.6\times10^{-5}$ % con $n$=1200 — mientras que mejorar
@@ -652,7 +666,7 @@ la escala exige trabajo físico real.
 
 | Fuente | Magnitud | Estado |
 |---|---|---|
-| Calibración de escala px→cm | 2× el error de escala | ❌ fase 2 |
+| Calibración de escala px→cm | 3× el error de escala | ❌ fase 2 |
 | Perspectiva de la fotografía | ~2·(R/distancia) | ❌ fase 2 |
 | Extracción del contorno | 1–3 px por borde | ❌ fase 2 |
 | Asimetría del envase | 0–5 % | ❌ fase 2 |
@@ -666,8 +680,8 @@ sobra precisión.
 
 | Parámetro | Objetivo | Límite |
 |---|---|---|
-| Error de escala px→cm | < 1 % | < 2.5 % |
-| Error resultante en el volumen | < 2 % | < 5 % |
+| Error de escala px→cm | < 0.5 % | < 1.64 % |
+| Error resultante en el volumen | < 1.5 % | < 5 % |
 
 **Decisiones que se derivan:**
 
@@ -675,10 +689,11 @@ sobra precisión.
   aristas y ruido, y el trapecio no impone condiciones sobre $n$.
 - **Gauss:** solo por tramos, nunca global. Exige detectar antes los quiebres del perfil.
 - **Malla:** remuestrear a $n$ múltiplo de 6; subir $n$ es gratis.
-- **Validación:** volumen exterior por desplazamiento de agua.
-- **Escala:** ArUco + homografía, con dos clics manuales de respaldo. Verificar con regla
-  el tamaño impreso del marcador: las impresoras escalan sin avisar, y un 3 % de error ahí
-  se convierte en 6 % en el volumen.
+- **Validación:** fotos sintéticas de volumen exacto, más un envase de geometría conocida
+  (una lata) medido con regla.
+- **Escala:** la altura real del envase, medida con regla al medio milímetro. Está sobre
+  el eje de revolución, así que no hay problema de coplanaridad. Respaldo: dos clics
+  sobre una regla visible en la foto.
 - **Captura:** cámara lejos y con zoom, para aproximar la proyección ortográfica que
   supone el modelo.
 
