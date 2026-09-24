@@ -11,7 +11,8 @@ from dataclasses import dataclass
 import numpy as np
 
 from .integracion import Resultado, calcular_todos, n_compatible, remuestrear
-from .vision import SEGMENTADORES, Perfil, extraer_perfil, mapa_distancia
+from .vision import (SEGMENTADORES, CorreccionPerspectiva, Perfil,
+                     corregir_perspectiva, extraer_perfil, mapa_distancia)
 
 
 @dataclass(frozen=True)
@@ -21,6 +22,7 @@ class Estimacion:
     r_cm: np.ndarray
     resultados: list[Resultado]
     segmentador: str
+    perspectiva: CorreccionPerspectiva | None = None
 
     def volumen(self, metodo: str = "Trapecio") -> float:
         return next(r.volumen for r in self.resultados if r.metodo.startswith(metodo))
@@ -28,7 +30,9 @@ class Estimacion:
 
 def estimar_volumen(img: np.ndarray, altura_cm: float, segmentador: str = "otsu",
                     n: int | None = None, m_gauss: int = 5,
-                    paneles_gauss: int = 6) -> Estimacion:
+                    paneles_gauss: int = 6, focal_px: float | None = None,
+                    centro_px: tuple[float, float] | None = None,
+                    pitch_grados: float = 0.0) -> Estimacion:
     """Estima el volumen del envase de la foto.
 
     altura_cm     altura real del envase, medida con regla (fija la escala).
@@ -36,12 +40,24 @@ def estimar_volumen(img: np.ndarray, altura_cm: float, segmentador: str = "otsu"
                   redondeado a múltiplo de 6 (compatible con Simpson y 3/8).
     paneles_gauss Gauss se aplica por paneles iguales: sin detección de aristas,
                   partir en paneles evita el fallo de la regla global.
+    focal_px      focal de la cámara en píxeles. Si se da, se corrige la
+                  perspectiva (recomendado: sin corrección, a 50 cm el volumen
+                  sale ~10 % bajo). centro_px: centro óptico; por defecto, el
+                  centro de la imagen.
+    pitch_grados  inclinación del celular (+ = apunta hacia abajo), p. ej. la que
+                  marca el nivel de la cámara. Solo se usa si hay focal_px.
     """
     if segmentador not in SEGMENTADORES:
         raise ValueError(f"segmentador debe ser uno de {list(SEGMENTADORES)}")
     mascara = SEGMENTADORES[segmentador](img)
     perfil = extraer_perfil(mascara, altura_cm, mapa_distancia(img))
-    n = n or n_compatible(len(perfil.z_cm) - 1)
-    z, r = remuestrear(perfil.z_cm, perfil.r_cm, n)
+    z_cm, r_cm, persp = perfil.z_cm, perfil.r_cm, None
+    if focal_px:
+        centro = centro_px or (img.shape[1] / 2, img.shape[0] / 2)
+        persp = corregir_perspectiva(perfil, altura_cm, focal_px, centro, pitch_grados)
+        z_cm, r_cm = persp.z_cm, persp.r_cm
+    n = n or n_compatible(len(z_cm) - 1)
+    z, r = remuestrear(z_cm, r_cm, n)
     cortes = list(np.linspace(z[0], z[-1], paneles_gauss + 1)[1:-1])
-    return Estimacion(perfil, z, r, calcular_todos(z, r, m_gauss, cortes), segmentador)
+    return Estimacion(perfil, z, r, calcular_todos(z, r, m_gauss, cortes),
+                      segmentador, persp)

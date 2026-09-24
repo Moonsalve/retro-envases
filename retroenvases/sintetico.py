@@ -89,37 +89,127 @@ def generar(tramos: Tramos, escena: Escena = Escena()
     dentro = np.abs(dx) <= r_px[:, None]
     alfa = dentro.reshape(alto, k, ancho, k).mean(axis=(1, 3)).astype(np.float32)
 
-    # sombreado cilíndrico: 1 en el centro, (1 - sombreado) en los bordes
-    xs1 = np.arange(ancho) + 0.5
-    ys1 = np.arange(alto) + 0.5
-    r1 = radio(tramos, (base_px - ys1) / s) * s
-    u = np.abs(xs1[None, :] - cx) / np.maximum(r1[:, None], 1e-6)
-    luz = 1 - escena.sombreado * np.clip(u, 0, 1) ** 2
-
-    # --- fondo: degradé + textura de baja frecuencia ------------------------
-    grad = 1 - escena.degrade_fondo * (ys1[:, None] / alto) * np.ones((1, ancho))
-    tex = cv2.GaussianBlur(rng.normal(0, 1, (alto, ancho)).astype(np.float32),
-                           (0, 0), 25) * escena.textura_fondo * 25
-    fondo = np.stack([np.clip(c * grad + tex, 0, 255) for c in escena.color_fondo], -1)
-    envase = np.stack([c * luz for c in escena.color_envase], -1)
-    img = alfa[..., None] * envase + (1 - alfa[..., None]) * fondo
-
-    # --- inclinación de la cámara respecto al eje --------------------------
-    if escena.inclinacion_grados:
-        M = cv2.getRotationMatrix2D((cx, alto / 2), escena.inclinacion_grados, 1.0)
-        img = cv2.warpAffine(img.astype(np.float32), M, (ancho, alto),
-                             flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
-
-    # --- óptica y sensor -----------------------------------------------------
-    if escena.desenfoque_px:
-        img = cv2.GaussianBlur(img.astype(np.float32), (0, 0), escena.desenfoque_px)
-    img = img + rng.normal(0, escena.ruido, img.shape)
-    img = np.clip(img, 0, 255).astype(np.uint8)
+    img = _componer(alfa, escena, rng, rotar_centro=(cx, alto / 2))
 
     verdad = {
         "volumen_cm3": volumen_exacto(tramos),
         "altura_cm": altura_cm,
         "px_por_cm": s,
         "cortes_cm": [t[1] for t in tramos[:-1]],
+    }
+    return img, verdad
+
+
+def _componer(alfa: np.ndarray, escena: Escena, rng: np.random.Generator,
+              rotar_centro: tuple[float, float] | None = None) -> np.ndarray:
+    """Pinta envase y fondo a partir del mapa de cobertura `alfa` (0..1)."""
+    alto, ancho = alfa.shape
+    # sombreado cilíndrico: 1 en el centro de cada fila, (1 − sombreado) en los bordes
+    luz = np.ones_like(alfa)
+    for f in np.where((alfa > 0.5).any(axis=1))[0]:
+        cols = np.flatnonzero(alfa[f] > 0.5)
+        c, sw = (cols[0] + cols[-1]) / 2, max((cols[-1] - cols[0]) / 2, 1.0)
+        u = np.abs(np.arange(ancho) - c) / sw
+        luz[f] = 1 - escena.sombreado * np.clip(u, 0, 1) ** 2
+    ys1 = np.arange(alto) + 0.5
+    grad = 1 - escena.degrade_fondo * (ys1[:, None] / alto) * np.ones((1, ancho))
+    tex = cv2.GaussianBlur(rng.normal(0, 1, (alto, ancho)).astype(np.float32),
+                           (0, 0), 25) * escena.textura_fondo * 25
+    fondo = np.stack([np.clip(c * grad + tex, 0, 255) for c in escena.color_fondo], -1)
+    envase = np.stack([c * luz for c in escena.color_envase], -1)
+    img = alfa[..., None] * envase + (1 - alfa[..., None]) * fondo
+    if escena.inclinacion_grados and rotar_centro is not None:
+        M = cv2.getRotationMatrix2D(rotar_centro, escena.inclinacion_grados, 1.0)
+        img = cv2.warpAffine(img.astype(np.float32), M, (ancho, alto),
+                             flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+    if escena.desenfoque_px:
+        img = cv2.GaussianBlur(img.astype(np.float32), (0, 0), escena.desenfoque_px)
+    img = img + rng.normal(0, escena.ruido, img.shape)
+    return np.clip(img, 0, 255).astype(np.uint8)
+
+
+def generar_perspectiva(tramos: Tramos, escena: Escena = Escena(),
+                        distancia_cm: float = 100.0,
+                        altura_camara_cm: float | None = None,
+                        pitch_grados: float = 0.0,
+                        muestras: int = 160) -> tuple[np.ndarray, dict]:
+    """Foto sintética con una cámara estenopeica (pinhole) REAL.
+
+    Geometría (cm): eje del envase = eje Z, base en z = 0. Cámara en
+    (0, −distancia_cm, altura_camara_cm) mirando hacia +Y, girada `pitch_grados`
+    (positivo = apunta hacia abajo). Por defecto a media altura del envase.
+
+    La focal se elige para que un objeto EN EL EJE mida escena.px_por_cm píxeles
+    por cm: equivale a alejarse usando zoom, manteniendo la resolución.
+
+    Para cada píxel se lanza un rayo y se calcula g = min_t [ρ(t) − r(z(t))], la
+    distancia (con signo) del rayo a la superficie. g ≤ 0 → el rayo toca el envase.
+    La cobertura del píxel se obtiene de g con una rampa del tamaño del píxel a
+    esa profundidad, lo que da bordes con antialiasing subpíxel.
+    """
+    rng = np.random.default_rng(escena.semilla)
+    H = tramos[-1][1] - tramos[0][0]
+    rmax = max(max(t[2], t[3]) for t in tramos)
+    D = float(distancia_cm)
+    hc = H / 2 if altura_camara_cm is None else float(altura_camara_cm)
+    f = escena.px_por_cm * D                              # focal [px]
+    th = math.radians(pitch_grados)
+    ct, st = math.cos(th), math.sin(th)
+
+    # tamaño de la imagen: proyectar la caja del envase y dejar margen
+    esquinas = [(x, y, z) for x in (-rmax, rmax) for y in (-rmax, rmax) for z in (0, H)]
+    us, vs = [], []
+    for x, y, z in esquinas:
+        # mundo → cámara (deshacer el pitch)
+        dy, dz = y + D, z - hc
+        yc, zc = ct * dy - st * dz, st * dy + ct * dz
+        us.append(f * x / yc)
+        vs.append(-f * zc / yc)
+    # Como en una foto real, el centro óptico es el centro de la imagen: el marco
+    # se hace simétrico alrededor de él (si la cámara está a la altura de la base,
+    # el envase queda en la mitad superior de la foto).
+    m = escena.margen_cm * escena.px_por_cm
+    semi_u = max(abs(u) for u in us) + m
+    semi_v = max(abs(v) for v in vs) + m
+    ancho = 2 * int(math.ceil(max(semi_u, semi_v * 0.6)))
+    alto = 2 * int(math.ceil(semi_v))
+    cu, cv = ancho / 2, alto / 2
+
+    alfa = np.zeros((alto, ancho), np.float32)
+    uu = (np.arange(ancho) + 0.5 - cu) / f
+    tt = np.linspace(0.0, 1.0, muestras)
+    for f0 in range(0, alto, 48):                          # por bloques de filas
+        vv = (np.arange(f0, min(f0 + 48, alto)) + 0.5 - cv) / f
+        X, Zc = np.meshgrid(uu, -vv)                      # dirección en cámara (x, 1, z)
+        # rotar al mundo por el pitch
+        dy = ct * 1.0 + st * Zc
+        dz = -st * 1.0 + ct * Zc
+        dx = X
+        # recorrer solo el tramo del rayo donde |y| ≤ rmax
+        ta = (D - rmax * 1.05) / dy
+        tb = (D + rmax * 1.05) / dy
+        T = ta[..., None] + (tb - ta)[..., None] * tt       # (filas, cols, muestras)
+        px = T * dx[..., None]
+        py = -D + T * dy[..., None]
+        pz = hc + T * dz[..., None]
+        rho = np.sqrt(px * px + py * py)
+        # Distancia con signo al sólido = intersección de la pared lateral y las
+        # dos tapas (base z=0 y boca z=H): el máximo de las tres restricciones.
+        g = np.min(np.maximum(np.maximum(rho - radio(tramos, pz), pz - H), -pz),
+                   axis=-1)
+        prof = ta * 1.0 + rmax                              # ≈ profundidad del borde
+        tam_px = prof / f                                   # tamaño del píxel en cm
+        alfa[f0:f0 + vv.size] = np.clip(0.5 - g / tam_px, 0, 1)
+
+    img = _componer(alfa, escena, rng)
+    verdad = {
+        "volumen_cm3": volumen_exacto(tramos),
+        "altura_cm": H,
+        "px_por_cm": escena.px_por_cm,
+        "distancia_cm": D,
+        "altura_camara_cm": hc,
+        "pitch_grados": pitch_grados,
+        "focal_px": f,
+        "centro_px": (cu, cv),
     }
     return img, verdad

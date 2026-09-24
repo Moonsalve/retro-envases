@@ -173,6 +173,13 @@ class Perfil:
     px_por_cm: float
     z_cm: np.ndarray
     r_cm: np.ndarray
+    # Geometría en píxeles (imagen ya enderezada), para corregir la perspectiva
+    filas: np.ndarray           # índice de fila de cada muestra, de arriba abajo
+    borde_izq: np.ndarray       # borde izquierdo subpíxel de cada fila [columna]
+    borde_der: np.ndarray       # borde derecho subpíxel de cada fila [columna]
+    tope_px: float              # borde superior subpíxel [fila]
+    base_px: float              # borde inferior subpíxel [fila]
+    rotacion: np.ndarray | None  # matriz 2×3 usada para enderezar (None si no se rotó)
 
 
 def _bordes_por_fila(m: np.ndarray):
@@ -243,6 +250,7 @@ def extraer_perfil(mascara: np.ndarray, altura_cm: float,
 
     # 1) enderezar: rotar máscara (y mapa) para dejar el eje vertical
     ang = _inclinacion(m)
+    R = None
     if abs(ang) > 0.05:
         ys, xs = np.nonzero(m)
         centro = (float(xs.mean()), float(ys.mean()))
@@ -292,6 +300,8 @@ def extraer_perfil(mascara: np.ndarray, altura_cm: float,
         base_e = b if b is not None else base_e
     altura_px = float(base_e - tope_e)
 
+    geometria = (filas.copy(), bi.copy(), bd.copy(), float(tope_e), float(base_e), R)
+
     # 4) z desde la base; extender a los extremos 0 y H para integrar toda la altura
     z_px = (base_e - filas.astype(float))[::-1]
     r_px = r_px[::-1]
@@ -303,4 +313,163 @@ def extraer_perfil(mascara: np.ndarray, altura_cm: float,
     s = altura_px / altura_cm                     # 5) escala: px por cm
     frac = refinados / (2 * len(filas)) if d is not None else 0.0
     return Perfil(z_px, r_px, altura_px, ang, asim, frac, m * 255, s,
-                  z_px / s, r_px / s)
+                  z_px / s, r_px / s, *geometria)
+
+
+# ────────────────────────────────────────────────────────── perspectiva ──
+@dataclass(frozen=True)
+class CorreccionPerspectiva:
+    z_cm: np.ndarray
+    r_cm: np.ndarray
+    distancia_cm: float          # distancia estimada de la cámara al eje del envase
+    altura_camara_cm: float      # altura estimada de la cámara sobre la base
+
+
+def focal_px_desde_35mm(focal_35mm: float, ancho_px: int, alto_px: int) -> float:
+    """Focal en píxeles a partir de la focal equivalente de 35 mm (dato EXIF).
+
+    La equivalencia de 35 mm se define por la diagonal (43.27 mm del negativo
+    de 36×24 mm). Solo vale si la foto no fue recortada; redimensionarla sí vale.
+    """
+    return focal_35mm * math.hypot(ancho_px, alto_px) / 43.27
+
+
+def corregir_perspectiva(perfil: Perfil, altura_cm: float, focal_px: float,
+                         centro_px: tuple[float, float], pitch_grados: float = 0.0,
+                         iteraciones: int = 5) -> CorreccionPerspectiva:
+    """Reconstruye r(z) en cm invirtiendo la proyección de una cámara pinhole.
+
+    Modelo: eje del envase vertical; centro óptico `centro_px` y focal
+    `focal_px` conocidos; celular inclinado `pitch_grados` hacia abajo (0 =
+    vertical; negativo = apunta hacia arriba). Cada rayo se rota por esa
+    inclinación antes de hacer las cuentas.
+
+    1. Distancia D. El tope y la base de la silueta son los bordes de la boca y
+       de la base más CERCANOS a la cámara (o los más lejanos, si la cámara está
+       por encima de la boca o por debajo de la base). Sus rayos y la altura real
+       H dan dos ecuaciones:  H − hc = a_t·(D ± r_t)   y   −hc = a_b·(D ± r_b),
+       con a = pendiente vertical del rayo. Restándolas se despeja D; la altura de
+       la cámara hc se cancela y sale después.
+    2. Perfil. El rayo de cada borde de la silueta es tangente al envase. Se
+       toma su punto de MÁXIMO ACERCAMIENTO al eje: la distancia es el radio y la
+       z de ese punto es la altura. Es exacto en paredes verticales; en una pared
+       inclinada el punto de tangencia real se desplaza, pero comparado contra
+       fuerza bruta el error es < 0.002 cm en r y < 0.03 cm en z (despreciable).
+       Una versión con la pendiente de la pared resultó exacta en teoría pero
+       peor en la práctica: la derivada numérica del perfil mete más ruido del
+       que corrige.
+    3. Arcos de los bordes. La boca y la base son círculos que en perspectiva se
+       ven como arcos de elipse: si la cámara está por debajo de la boca, su punto
+       más cercano aparece más arriba que sus extremos laterales. En esas filas la
+       silueta no es la pared sino el círculo del borde. Se reconocen porque el
+       punto de máximo acercamiento del rayo cae FUERA del envase (z > H o z < 0);
+       para ellas se intersecta el rayo con el plano de la boca (z = H) o de la
+       base (z = 0), lo que da directamente el radio del borde. Así esas filas,
+       lejos de estorbar, miden los radios que necesita el paso 1.
+    Los radios de boca y base del paso 1 salen del paso 3: se itera unas veces.
+    """
+    cx, cy = centro_px[0] - 0.5, centro_px[1] - 0.5     # a coordenadas de índice
+    if perfil.rotacion is not None:
+        cx, cy = perfil.rotacion @ np.array([cx, cy, 1.0])
+    f = float(focal_px)
+    th = math.radians(pitch_grados)
+    ct, st = math.cos(th), math.sin(th)
+
+    def rayo(u, v):
+        """Pixel → rayo en el mundo, normalizado a avance unitario hacia el envase.
+
+        Devuelve (x, a): desplazamiento lateral y subida por cm de profundidad.
+        """
+        xc = (np.asarray(u, float) - cx) / f
+        zc = -(np.asarray(v, float) - cy) / f
+        dy = ct + st * zc                                 # rotación por la inclinación
+        dz = -st + ct * zc
+        return xc / dy, dz / dy
+
+    filas = perfil.filas.astype(float)
+    u_eje = float(np.median((perfil.borde_izq + perfil.borde_der) / 2))
+    x_eje, _ = rayo(u_eje, cy)
+    _, a_t = rayo(u_eje, perfil.tope_px)
+    _, a_b = rayo(u_eje, perfil.base_px)
+
+    # arranque: radios de boca y base del perfil sin corregir (mediana del 2 %
+    # extremo: la última fila suele estar cubierta solo en parte); paredes verticales
+    zc, rc = perfil.z_cm, perfil.r_cm
+    r_t = float(np.median(rc[zc > altura_cm * 0.98]))
+    r_b = float(np.median(rc[zc < altura_cm * 0.02]))
+    sig_t, sig_b = -1.0, -1.0                            # borde cercano (−) o lejano (+)
+    D_prev = None
+    for _ in range(iteraciones):
+        D = (altura_cm - a_t * sig_t * r_t + a_b * sig_b * r_b) / (a_t - a_b)
+        if not np.isfinite(D) or D <= max(r_t, r_b):    # salvaguarda: no divergir
+            if D_prev is None:
+                raise ValueError("No se pudo estimar la distancia de la cámara.")
+            D = D_prev
+        D_prev = D
+        hc = -a_b * (D + sig_b * r_b)
+        sig_t = -1.0 if hc < altura_cm else 1.0
+        sig_b = -1.0 if hc > 0 else 1.0
+        X0 = x_eje * D                                   # desplazamiento lateral del eje
+        radios, alturas, en_boca, en_base = [], [], [], []
+        for borde in (perfil.borde_izq, perfil.borde_der):
+            x, a = rayo(borde, filas)
+            t = (x * X0 + D) / (x * x + 1)               # máximo acercamiento al eje
+            radios.append(np.hypot(t * x - X0, t - D))
+            alturas.append(hc + a * t)
+            en_boca.append(_corte_plano(x, a, altura_cm, hc, D, X0))
+            en_base.append(_corte_plano(x, a, 0.0, hc, D, X0))
+        r = (radios[0] + radios[1]) / 2
+        z = (alturas[0] + alturas[1]) / 2
+        # filas cuyo punto de máximo acercamiento cae fuera del envase: son arco
+        arco_t, arco_b = z >= altura_cm, z <= 0
+        pared = ~arco_t & ~arco_b
+        r_t = _radio_borde(en_boca, arco_t, altura_cm, hc, D, z, r, pared, r_t)
+        r_b = _radio_borde(en_base, arco_b, 0.0, hc, D, z, r, pared, r_b)
+
+    # el perfil es la pared; se cierra con los radios de boca y base medidos
+    z, r = z[pared], r[pared]
+    orden = np.argsort(z)
+    z, r = z[orden], r[orden]
+    dentro = (z > 0) & (z < altura_cm)
+    z, r = z[dentro], r[dentro]
+    z = np.concatenate([[0.0], z, [altura_cm]])
+    r = np.concatenate([[r_b], r, [r_t]])
+    return CorreccionPerspectiva(z, r, float(D), float(hc))
+
+
+def _corte_plano(x: np.ndarray, a: np.ndarray, z_plano: float, hc: float, D: float,
+                 X0: float) -> np.ndarray:
+    """Distancia al eje del punto donde cada rayo corta el plano z = z_plano.
+
+    NaN si el corte cae fuera de la huella física del envase (p. ej. con la
+    cámara a la altura de ese plano, donde el corte es degenerado: t ≈ 0).
+    """
+    with np.errstate(divide="ignore", invalid="ignore"):
+        t = (z_plano - hc) / a
+    rho = np.hypot(t * x - X0, t - D)
+    return np.where(np.abs(t - D) < 0.5 * D, rho, np.nan)
+
+
+def _radio_borde(cortes: list[np.ndarray], arco: np.ndarray, z_borde: float,
+                 hc: float, D: float, z: np.ndarray, r: np.ndarray,
+                 pared: np.ndarray, previo: float, umbral_arco_cm: float = 0.4) -> float:
+    """Radio del borde (boca o base). Hay dos formas de medirlo y cada una falla
+    donde la otra acierta; se elige por el alto del arco, ≈ |z_borde − hc|·r/D:
+
+    • Arco grande (cámara cerca o lejos del plano del borde): la pared junto al
+      borde queda oculta tras el arco o se ve muy oblicua (típico de un pie
+      acampanado). Se usan las filas del arco, cortadas con el plano del borde.
+    • Arco pequeño: la pared llega casi hasta el borde y se mide bien fila por
+      fila; el arco, en cambio, son pocas filas casi horizontales cuyo ancho
+      se sobrestima. Se usa la mediana de la pared en los 3 mm junto al borde.
+    """
+    alto_arco = abs(z_borde - hc) * previo / max(D - previo, 1e-6)
+    if alto_arco > umbral_arco_cm and arco.sum() >= 3:
+        valores = np.concatenate([c[arco] for c in cortes])
+        valores = valores[np.isfinite(valores)]
+        if valores.size >= 3:
+            return float(np.median(valores))
+    cerca = pared & (np.abs(z - z_borde) < 0.3)
+    if cerca.sum() >= 3:
+        return float(np.median(r[cerca]))
+    return previo

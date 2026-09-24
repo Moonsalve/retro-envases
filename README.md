@@ -5,9 +5,10 @@ integración numérica.
 
 **Estado:**
 - **Fase 1 completa** — motor de integración numérica validado contra un volumen exacto.
-- **Fase 2 en curso** — pipeline de visión (foto → perfil → volumen) implementado y
-  validado con fotos sintéticas: 180/180 corridas dentro del 5 %, error medio 0.10–0.14 %.
-  Falta: modelar perspectiva, probar con fotos reales y la app en Streamlit.
+- **Fase 2 en curso** — pipeline de visión (foto → perfil → volumen) con corrección de
+  perspectiva, validado con fotos sintéticas renderizadas con una cámara pinhole real:
+  ≤ 1 % de error entre 35 y 200 cm de distancia (sin corregir: −2 % a −20 %).
+  Falta: leer la focal del EXIF, probar con fotos reales y la app en Streamlit.
 
 ---
 
@@ -181,8 +182,8 @@ Paquete `retroenvases/`:
 |---|---|
 | `integracion.py` | Los 4 métodos (Trapecio, Simpson, Newton-Cotes 3/8, Gauss), el remuestreo a malla uniforme y `calcular_todos()` |
 | `vision.py` | Corrección de iluminación, segmentación **Otsu** y **GrabCut**, enderezado del eje, bordes subpíxel y escala por la altura |
-| `pipeline.py` | `estimar_volumen(foto, altura_cm, segmentador)`: la cadena completa |
-| `sintetico.py` | Fotos sintéticas de envases con volumen exacto conocido |
+| `pipeline.py` | `estimar_volumen(foto, altura_cm, segmentador, focal_px, pitch_grados)`: la cadena completa |
+| `sintetico.py` | Fotos sintéticas con volumen exacto: ortográficas (`generar`) y con cámara pinhole real (`generar_perspectiva`) |
 
 ## La cadena
 
@@ -227,9 +228,89 @@ corridas contra el volumen exacto:
 El peor caso en ambos es el "combo difícil" (envase claro sobre fondo claro, degradé,
 inclinación y ruido juntos).
 
-**Límite de esta validación:** las fotos sintéticas son proyección **ortográfica**. Una
-foto real tiene perspectiva, que agranda la parte del envase más cercana a la cámara.
-Es la principal fuente de error que falta cuantificar.
+Estas fotos son proyección **ortográfica**. La perspectiva se trata en la sección
+siguiente.
+
+## Perspectiva: la fuente de error dominante
+
+Renderizando con una cámara pinhole real (se lanza un rayo por píxel contra el sólido de
+revolución), el pipeline sin corregir **subestima el volumen** de forma sistemática:
+
+| Distancia | Botella 21 cm | Lata 12 cm | Vaso 12 cm |
+|---|---|---|---|
+| 25 cm | −16.8 % | −22.1 % | −26.4 % |
+| 50 cm | −9.2 % | −12.1 % | −14.2 % |
+| 100 cm | −4.8 % | −6.1 % | −7.1 % |
+| 200 cm | −2.3 % | −2.9 % | −3.5 % |
+
+**Por qué.** El tope y la base de la silueta no están sobre el eje: son los bordes de la
+boca y de la base **más cercanos a la cámara**, r cm por delante, y se ven agrandados. La
+altura en píxeles sale inflada, la escala también, y todo en cm queda chico (×3 en V).
+
+### La corrección (`vision.corregir_perspectiva`)
+
+Con la focal de la cámara en píxeles (del EXIF) se invierte el modelo pinhole:
+
+1. **Distancia D.** Los rayos del tope y de la base, más la altura real H, dan dos
+   ecuaciones: `H − hc = a_t·(D − r_t)` y `−hc = a_b·(D − r_b)` (a = pendiente del rayo).
+   Restándolas se despeja D; la altura de la cámara hc se cancela y sale después.
+2. **Perfil.** El rayo de cada borde de la silueta es tangente al envase: su punto de
+   máximo acercamiento al eje da el radio y la altura reales.
+3. **Arcos de boca y base.** Esos bordes son círculos que se ven como arcos de elipse,
+   de alto ≈ |H − hc|·r/D. Las filas del arco (máximo acercamiento fuera del envase) no
+   son pared. El radio del borde se toma del arco (cortándolo con el plano del borde) si
+   el arco es grande, o de la pared adyacente si es pequeño: cada medición falla donde la
+   otra acierta.
+
+Con el celular inclinado, cada rayo se rota por la inclinación informada.
+
+**Cosas que se probaron y se descartaron** (quedan documentadas en el código):
+tangencia exacta usando la pendiente de la pared (exacta en teoría, peor en la práctica
+por el ruido de la derivada numérica; el error de no usarla es < 0.002 cm) y medir los
+arcos por columnas (deja el sistema indeterminado: el vértice del arco es el mismo punto
+con el que se despeja D).
+
+### Resultados (`python -m tests.banco_perspectiva`)
+
+| Condición | Error corregido |
+|---|---|
+| Distancia 35–200 cm, cámara a media altura | ≤ 1.0 % |
+| Distancia 25 cm | ≤ 1.6 % |
+| Cámara entre la base y la boca (40 cm) | ≤ 1.5 % |
+| Cámara 10 cm **sobre** la boca | hasta −4.7 % ⚠ |
+| Celular inclinado ±10°, **inclinación informada** | ≤ 1.0 % |
+| Celular inclinado ±10°, se asume vertical | hasta +6.5 % ⚠ |
+| Focal equivocada ±5 % | ≤ 1.5 % |
+| Focal equivocada ±10 % | hasta 2.4 % |
+
+## Protocolo de captura (derivado de esos números)
+
+1. **Distancia 40–100 cm**, sin zoom (así la focal del EXIF es la de la cámara principal).
+2. **Cámara entre la base y la boca**, idealmente a media altura. Nunca por encima.
+3. **Celular vertical**, usando el nivel de la cámara (±2°), o informar la inclinación.
+4. **Foto tomada con la app de cámara y subida como archivo**, para conservar el EXIF
+   con la focal. Si falta, hay que informar la focal equivalente (±5 %).
+5. **Medir la altura del envase al medio milímetro.** Es la única referencia de escala y
+   su error se multiplica ×3.
+6. Fondo liso que contraste con el envase, sin que el envase toque los bordes de la foto.
+
+### Presupuesto de error resultante (siguiendo el protocolo)
+
+| Fuente | Botella 21 cm | Lata 12 cm |
+|---|---|---|
+| Altura medida ±0.5 mm (×3) | 0.7 % | 1.2 % |
+| Perspectiva residual | ≤ 1.0 % | ≤ 1.0 % |
+| Inclinación ±2° no informada | ~0.5 % | ~0.5 % |
+| Focal EXIF (±3 %) | ~0.6 % | ~0.9 % |
+| Segmentación y bordes | ~0.2 % | ~0.2 % |
+| **Peor caso (suma)** | **~3 %** | **~3.8 %** |
+
+Cabe en el 5 %, pero con poco margen en envases pequeños: la altura medida con regla es
+el término que más pesa y el único que depende del cuidado del usuario.
+
+**Límites de la validación sintética:** no modela distorsión de lente (los celulares la
+corrigen en la propia cámara), envases transparentes o con reflejos, ni etiquetas de
+colores. Falta contrastar con fotos reales.
 
 ## Cobertura del enunciado
 
