@@ -171,7 +171,7 @@ trapecio baja a 2.6e-5 %), mientras que mejorar la escala cuesta trabajo físico
 | Validación | Fotos sintéticas de volumen exacto + un envase de geometría conocida (lata) medido con regla | Sin impresora ni medición con agua; el PDF admite "recipiente de geometría conocida" |
 | Escala | Altura real del envase medida con regla, al medio milímetro | Está sobre el eje: sin problema de coplanaridad. Error objetivo < 0.5 %, límite < 1.64 % |
 | Segmentación | Otsu/Canny **y** GrabCut, comparados | Cubre el requisito de la Etapa 1 de investigar dos estrategias |
-| Aplicación | Streamlit en Streamlit Cloud | `st.camera_input()` funciona en el celular; HTTPS gratis |
+| Aplicación | Streamlit, solo en local, con fotos descargadas | Basta para el laboratorio; sin despliegue |
 
 ---
 
