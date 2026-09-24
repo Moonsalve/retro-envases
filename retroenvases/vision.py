@@ -149,6 +149,9 @@ def segmentar_grabcut(img: np.ndarray, rect: tuple[int, int, int, int] | None = 
         rect_p = tuple(int(round(v * f)) for v in rect)
     mascara = np.zeros((ph, pw), np.uint8)
     bg, fg = np.zeros((1, 65), np.float64), np.zeros((1, 65), np.float64)
+    # GrabCut inicializa sus modelos de color con k-means aleatorio: sin fijar la
+    # semilla, la misma foto da máscaras ligeramente distintas (±0.3 % de área).
+    cv2.setRNGSeed(0)
     cv2.grabCut(peq, mascara, rect_p, bg, fg, iteraciones, cv2.GC_INIT_WITH_RECT)
     objeto = np.isin(mascara, (cv2.GC_FGD, cv2.GC_PR_FGD)).astype(np.float32)
     if f < 1:

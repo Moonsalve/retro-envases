@@ -8,8 +8,8 @@ integración numérica.
 - **Fase 2 en curso** — pipeline de visión (foto → perfil → volumen) con corrección de
   perspectiva, validado con fotos sintéticas renderizadas con una cámara pinhole real:
   ≤ 1 % de error entre 35 y 200 cm de distancia (sin corregir: −2 % a −20 %).
-- **App web en Streamlit** — `app/streamlit_app.py`. Falta: validar con una foto real
-  tomada siguiendo el protocolo, y desplegarla.
+- **App web local en Streamlit** — `app/streamlit_app.py`, con fotos de Descargas.
+  Falta: validar con una foto real tomada siguiendo el protocolo y con la altura medida.
 
 ---
 
@@ -290,8 +290,8 @@ con el que se despeja D).
 1. **Distancia 40–100 cm**, sin zoom (así la focal del EXIF es la de la cámara principal).
 2. **Cámara entre la base y la boca**, idealmente a media altura. Nunca por encima.
 3. **Celular vertical**, usando el nivel de la cámara (±2°), o informar la inclinación.
-4. **Foto tomada con la app de cámara y subida como archivo**, para conservar el EXIF
-   con la focal. Si falta, hay que informar la focal equivalente (±5 %).
+4. Si la foto se pasa por WhatsApp, **enviarla como Documento** para conservar el EXIF
+   con la focal; si no, se asume 26 mm.
 5. **Medir la altura del envase al medio milímetro.** Es la única referencia de escala y
    su error se multiplica ×3.
 6. Fondo liso que contraste con el envase, sin que el envase toque los bordes de la foto.
@@ -316,37 +316,46 @@ colores. Falta contrastar con fotos reales.
 
 ---
 
-# La aplicación web
+# La aplicación web (local)
 
 ```bash
-pip install -r requirements.txt
-streamlit run app/streamlit_app.py
+cd ~/Developer/retro-envases
+.venv/bin/streamlit run app/streamlit_app.py
 ```
+
+Se abre en `http://localhost:8501`. Funciona solo en local, con fotos ya descargadas.
 
 Flujo, que sigue las etapas del enunciado:
 
-1. **Foto**: subir el archivo (recomendado, conserva el EXIF), tomarla con la cámara del
-   navegador, o usar un **ejemplo sintético** de volumen exacto para comprobar que todo
+1. **Foto**: se elige de `~/Downloads` (la más reciente aparece primero), se sube otro
+   archivo, o se usa un **ejemplo sintético** de volumen exacto para comprobar que todo
    funciona.
 2. **Escala**: la altura real del envase, medida con regla.
 3. **Selección del envase**: GrabCut con un rectángulo ajustable (recomendado), GrabCut
    automático u Otsu (solo con fondo liso).
-4. **Perspectiva**: focal leída del EXIF (o escrita a mano) e inclinación del celular.
+4. **Perspectiva**: focal leída del EXIF si la foto la trae. Una foto que llegó por
+   WhatsApp no la trae: se usa 26 mm, la típica de la cámara principal de un celular
+   (±10 % de error en la focal mete hasta 2.4 % en el volumen). Y la inclinación del
+   celular.
 5. **Resultados**: volumen, contorno sobre la foto, perfil en cm, gráfica de π·r², tabla
    de los 4 métodos con n, [a,b], Δz, orden, integral, volumen y tiempo, y comparación
    con un volumen de referencia opcional.
 6. **Diagnóstico**: escala, inclinación corregida, asimetría, fracción de bordes
-   subpíxel, distancia y altura estimadas de la cámara, y **alertas** cuando la foto
-   viola las condiciones del modelo.
+   subpíxel, distancia y altura estimadas de la cámara, y alertas.
 7. **Datos para el informe**: tabla (zᵢ, rᵢ, rᵢ², π·rᵢ²) y resultados en texto para
    copiar. La app no descarga archivos.
 
-Con el ejemplo sintético (botella de 616.61 cm³ fotografiada a 50 cm) la app da
-619.1 cm³: **0.40 %** de error. Sin la corrección de perspectiva, 9.17 %.
+**Salvaguardas** (cada una salió de un fallo real al probarla):
 
-**Despliegue en Streamlit Cloud:** subir el repo a GitHub, crear la app en
-share.streamlit.io con *main file* `app/streamlit_app.py`. `requirements.txt` ya incluye
-todo; el HTTPS de Streamlit Cloud es el que permite usar la cámara desde el celular.
+- **"Resultado no confiable"** arriba del volumen si la silueta es muy asimétrica
+  (> 5 %: el contorno incluyó fondo), si el contorno toca el rectángulo (el rectángulo
+  corta el envase) o si la cámara estaba a menos de 25 cm.
+- Altura, focal, inclinación, referencia y rectángulo se **reinician al cambiar de
+  foto**: antes arrastraban los valores de la anterior.
+- GrabCut con **semilla fija**: la misma foto da siempre el mismo volumen.
+
+Verificado con `streamlit.testing` (AppTest): el ejemplo sintético da **0.40 %** de
+error; un rectángulo demasiado ancho o que corta el envase dispara el aviso.
 
 ## Prueba con una foto real (`data/foto_prueba_1.jpeg`)
 
@@ -363,7 +372,9 @@ reenviada por WhatsApp. Lo que mostró:
   ancha arriba que abajo porque la foto se tomó desde arriba.
 - **WhatsApp borra el EXIF** y recomprime a 1200×1600: sin focal no hay corrección de
   perspectiva confiable.
-- Sin la altura medida, el volumen queda en función de ella: **V ≈ 0.0452·H³**.
+- Sin la altura medida el volumen no se puede fijar. En la app, suponiendo H = 26 cm
+  (valor de prueba, no medido), da ~881 cm³ con asimetría 0.9 %; entre 769 y 887 cm³
+  según la inclinación que se suponga, porque la real se desconoce.
 
 Conclusión: la segmentación funciona en una foto real difícil; el volumen de esa foto no
 es confiable por falta de datos de entrada, no por el algoritmo. Para validar hace falta
