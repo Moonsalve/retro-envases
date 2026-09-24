@@ -32,7 +32,8 @@ def estimar_volumen(img: np.ndarray, altura_cm: float, segmentador: str = "otsu"
                     n: int | None = None, m_gauss: int = 5,
                     paneles_gauss: int = 6, focal_px: float | None = None,
                     centro_px: tuple[float, float] | None = None,
-                    pitch_grados: float = 0.0) -> Estimacion:
+                    pitch_grados: float = 0.0,
+                    rect: tuple[int, int, int, int] | None = None) -> Estimacion:
     """Estima el volumen del envase de la foto.
 
     altura_cm     altura real del envase, medida con regla (fija la escala).
@@ -46,10 +47,15 @@ def estimar_volumen(img: np.ndarray, altura_cm: float, segmentador: str = "otsu"
                   centro de la imagen.
     pitch_grados  inclinación del celular (+ = apunta hacia abajo), p. ej. la que
                   marca el nivel de la cámara. Solo se usa si hay focal_px.
+    rect          (x, y, ancho, alto) alrededor del envase, para GrabCut. Con fondos
+                  reales (no lisos) es imprescindible.
     """
     if segmentador not in SEGMENTADORES:
         raise ValueError(f"segmentador debe ser uno de {list(SEGMENTADORES)}")
-    mascara = SEGMENTADORES[segmentador](img)
+    if segmentador == "grabcut" and rect is not None:
+        mascara = SEGMENTADORES["grabcut"](img, rect=rect)
+    else:
+        mascara = SEGMENTADORES[segmentador](img)
     perfil = extraer_perfil(mascara, altura_cm, mapa_distancia(img))
     z_cm, r_cm, persp = perfil.z_cm, perfil.r_cm, None
     if focal_px:

@@ -8,7 +8,8 @@ integración numérica.
 - **Fase 2 en curso** — pipeline de visión (foto → perfil → volumen) con corrección de
   perspectiva, validado con fotos sintéticas renderizadas con una cámara pinhole real:
   ≤ 1 % de error entre 35 y 200 cm de distancia (sin corregir: −2 % a −20 %).
-  Falta: leer la focal del EXIF, probar con fotos reales y la app en Streamlit.
+- **App web en Streamlit** — `app/streamlit_app.py`. Falta: validar con una foto real
+  tomada siguiendo el protocolo, y desplegarla.
 
 ---
 
@@ -182,7 +183,8 @@ Paquete `retroenvases/`:
 |---|---|
 | `integracion.py` | Los 4 métodos (Trapecio, Simpson, Newton-Cotes 3/8, Gauss), el remuestreo a malla uniforme y `calcular_todos()` |
 | `vision.py` | Corrección de iluminación, segmentación **Otsu** y **GrabCut**, enderezado del eje, bordes subpíxel y escala por la altura |
-| `pipeline.py` | `estimar_volumen(foto, altura_cm, segmentador, focal_px, pitch_grados)`: la cadena completa |
+| `pipeline.py` | `estimar_volumen(foto, altura_cm, segmentador, focal_px, pitch_grados, rect)`: la cadena completa |
+| `foto.py` | Carga de fotos de celular: orientación EXIF, focal equivalente de 35 mm, resolución de trabajo |
 | `sintetico.py` | Fotos sintéticas con volumen exacto: ortográficas (`generar`) y con cámara pinhole real (`generar_perspectiva`) |
 
 ## La cadena
@@ -311,6 +313,61 @@ el término que más pesa y el único que depende del cuidado del usuario.
 **Límites de la validación sintética:** no modela distorsión de lente (los celulares la
 corrigen en la propia cámara), envases transparentes o con reflejos, ni etiquetas de
 colores. Falta contrastar con fotos reales.
+
+---
+
+# La aplicación web
+
+```bash
+pip install -r requirements.txt
+streamlit run app/streamlit_app.py
+```
+
+Flujo, que sigue las etapas del enunciado:
+
+1. **Foto**: subir el archivo (recomendado, conserva el EXIF), tomarla con la cámara del
+   navegador, o usar un **ejemplo sintético** de volumen exacto para comprobar que todo
+   funciona.
+2. **Escala**: la altura real del envase, medida con regla.
+3. **Selección del envase**: GrabCut con un rectángulo ajustable (recomendado), GrabCut
+   automático u Otsu (solo con fondo liso).
+4. **Perspectiva**: focal leída del EXIF (o escrita a mano) e inclinación del celular.
+5. **Resultados**: volumen, contorno sobre la foto, perfil en cm, gráfica de π·r², tabla
+   de los 4 métodos con n, [a,b], Δz, orden, integral, volumen y tiempo, y comparación
+   con un volumen de referencia opcional.
+6. **Diagnóstico**: escala, inclinación corregida, asimetría, fracción de bordes
+   subpíxel, distancia y altura estimadas de la cámara, y **alertas** cuando la foto
+   viola las condiciones del modelo.
+7. **Datos para el informe**: tabla (zᵢ, rᵢ, rᵢ², π·rᵢ²) y resultados en texto para
+   copiar. La app no descarga archivos.
+
+Con el ejemplo sintético (botella de 616.61 cm³ fotografiada a 50 cm) la app da
+619.1 cm³: **0.40 %** de error. Sin la corrección de perspectiva, 9.17 %.
+
+**Despliegue en Streamlit Cloud:** subir el repo a GitHub, crear la app en
+share.streamlit.io con *main file* `app/streamlit_app.py`. `requirements.txt` ya incluye
+todo; el HTTPS de Streamlit Cloud es el que permite usar la cámara desde el celular.
+
+## Prueba con una foto real (`data/foto_prueba_1.jpeg`)
+
+Botella transparente de agua, fondo con ventana, laptop y objetos, tomada desde arriba y
+reenviada por WhatsApp. Lo que mostró:
+
+- **Otsu y GrabCut automático fallan** con un fondo desordenado: suponen que el marco de
+  la foto es fondo liso. **GrabCut con un rectángulo sí extrae la botella**, incluso
+  siendo transparente. Por eso el rectángulo es la opción recomendada en la app.
+- **El refinamiento subpíxel no se activa** con un fondo desordenado (el borde queda con
+  precisión de ~1 px, ~1 % en volumen). Mejora pendiente: usar el fondo local en vez del
+  global.
+- **La perspectiva sin corregir se nota a simple vista**: la botella aparece ~20 % más
+  ancha arriba que abajo porque la foto se tomó desde arriba.
+- **WhatsApp borra el EXIF** y recomprime a 1200×1600: sin focal no hay corrección de
+  perspectiva confiable.
+- Sin la altura medida, el volumen queda en función de ella: **V ≈ 0.0452·H³**.
+
+Conclusión: la segmentación funciona en una foto real difícil; el volumen de esa foto no
+es confiable por falta de datos de entrada, no por el algoritmo. Para validar hace falta
+una foto que siga el protocolo.
 
 ## Cobertura del enunciado
 
