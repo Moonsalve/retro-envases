@@ -9,3 +9,9 @@ comparacion_metodos.csv
 convergencia.csv
 resumen_informe.md
 .DS_Store
+
+# Fotos de prueba personales: no se suben
+data/*.jpg
+data/*.jpeg
+data/*.png
+.claude/
