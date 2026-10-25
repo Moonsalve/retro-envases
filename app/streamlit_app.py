@@ -179,8 +179,11 @@ with st.expander("📄 Antes de empezar: imprime la hoja de referencia y lee có
 
 # ── 1. foto ───────────────────────────────────────────────────────────────
 st.header("1. Foto del envase")
+# "Subir foto" va primero y por defecto: la cámara del navegador solo se enciende
+# cuando el usuario la elige (si el permiso ya estaba dado, mostrarla por defecto la
+# encendería apenas carga la página).
 origen = st.radio("¿De dónde sale la foto?",
-                  ["Tomar foto con la cámara", "Subir foto", "Ejemplo sintético"],
+                  ["Subir foto", "Tomar foto con la cámara", "Ejemplo sintético"],
                   horizontal=True)
 datos, verdad, nombre = None, None, None
 if origen == "Tomar foto con la cámara":
@@ -190,7 +193,8 @@ if origen == "Tomar foto con la cámara":
     if cam_in:
         datos, nombre = cam_in.getvalue(), "foto de la cámara"
 elif origen == "Subir foto":
-    arch = st.file_uploader("Foto (JPG, PNG o WEBP)", type=["jpg", "jpeg", "png", "webp"])
+    arch = st.file_uploader("Foto (JPG, PNG o WEBP). En el celular puedes elegir «Cámara» "
+                            "para tomarla en el momento", type=["jpg", "jpeg", "png", "webp"])
     if arch:
         datos, nombre = arch.getvalue(), arch.name
 else:
