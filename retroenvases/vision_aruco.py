@@ -298,7 +298,7 @@ def reconstruir(cam: Camara, filas: np.ndarray, borde_izq: np.ndarray,
     pared = (z > 0) & (z < H)
     zz, rr = z[pared], r[pared]
     orden = np.argsort(zz)
-    zz, rr = zz[orden], rr[orden]
+    zz, rr = zz[orden], _hampel(zz[orden], rr[orden])
     r0 = r_b if r_b is not None else float(rr[0])
     r1 = float(np.median(rr[zz > H - 0.4])) if (zz > H - 0.4).sum() >= 3 else float(rr[-1])
     zz = np.concatenate([[0.0], zz, [H]])
@@ -424,3 +424,29 @@ def _altura_por_arco(z, r, d_izq, d_der, C, X0, Y0, H0) -> float | None:
     if not mejores:
         return None
     return min(mejores)[1]
+
+
+def _hampel(z: np.ndarray, r: np.ndarray, semiventana_cm: float = 0.3,
+            tol_rel: float = 0.04) -> np.ndarray:
+    """Quita picos aislados del perfil (filtro de Hampel sobre r(z)).
+
+    El perfil de un sólido de revolución es suave salvo en sus aristas, y una arista
+    real (hombro, pie) es un cambio gradual de varios milímetros. Unas pocas filas
+    que se disparan respecto de sus vecinas son un artefacto de la segmentación
+    (p. ej. un pedazo de marcador pegado al borde). Cada radio que se aparta de la
+    mediana local (±`semiventana_cm`) más de max(3 desviaciones robustas,
+    `tol_rel`·mediana) se reemplaza por esa mediana.
+    """
+    r = r.copy()
+    ini = np.searchsorted(z, z - semiventana_cm)
+    fin = np.searchsorted(z, z + semiventana_cm, side="right")
+    original = r.copy()
+    for k in range(len(z)):
+        vecinos = original[ini[k]:fin[k]]
+        if vecinos.size < 5:
+            continue
+        med = float(np.median(vecinos))
+        mad = 1.4826 * float(np.median(np.abs(vecinos - med)))
+        if abs(original[k] - med) > max(3 * mad, tol_rel * med):
+            r[k] = med
+    return r

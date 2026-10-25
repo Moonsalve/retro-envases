@@ -56,6 +56,15 @@ class Hoja:
         return salida
 
 
+def distancia_control_mm(hoja: "Hoja") -> float:
+    """Distancia nominal entre los bordes EXTERIORES de los marcadores ID 0 e ID 1.
+
+    Es la medida que se le pide al usuario: al ser larga (~19 cm), el error de la
+    regla pesa poco. Medir solo el lado de un marcador (6 cm) triplicaría ese peso.
+    """
+    return hoja.ancho_mm - 2 * hoja.margen_mm
+
+
 CARTA = Hoja("Carta", 215.9, 279.4)
 A4 = Hoja("A4", 210.0, 297.0)
 HOJAS = {"Carta": CARTA, "A4": A4}
@@ -139,8 +148,9 @@ def pdf_plantilla(hoja: Hoja = CARTA) -> bytes:
     for k in range(11):
         alto = 2.5 if k % 5 == 0 else 1.5
         ax.plot([-50 + 10 * k, -50 + 10 * k], [y_r, y_r + alto], color="black", lw=0.6)
-    ax.text(0, y_r + 3.5, "Esta regla debe medir 100 mm  ·  cada cuadrado negro, 60 mm",
-            ha="center", fontsize=6.5)
+    ax.text(0, y_r + 3.5, f"Esta regla debe medir 100 mm  ·  de borde exterior a borde exterior "
+            f"de ID 0 a ID 1: {distancia_control_mm(hoja):.1f} mm (mídelo y escríbelo en la app)",
+            ha="center", fontsize=6)
     ax.text(0, hoja.alto_mm / 2 - 4,
             "Del píxel al volumen  ·  hoja de referencia  ·  imprimir al 100 % (sin «ajustar a la página»)",
             ha="center", va="top", fontsize=6.5)

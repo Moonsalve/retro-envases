@@ -1,6 +1,10 @@
-"""Del píxel al volumen — aplicación web.
+"""Del píxel al volumen — aplicación web (computador y celular).
 
-Ejecutar desde la raíz del repo:   streamlit run app/streamlit_app.py
+Estima el volumen de un envase a partir de una foto, con una hoja de referencia
+impresa (marcadores ArUco) bajo el envase. Cada sección corresponde a una etapa o
+requisito del enunciado del laboratorio.
+
+Ejecutar en local:   streamlit run app/streamlit_app.py
 """
 from __future__ import annotations
 
@@ -12,6 +16,9 @@ import time
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 import cv2
+import matplotlib
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -19,415 +26,534 @@ import streamlit as st
 
 from retroenvases import integracion as integ
 from retroenvases.foto import Foto, cargar
-from retroenvases.pipeline import estimar_volumen
-from retroenvases.sintetico import BOTELLA_600, Escena, generar_perspectiva, volumen_exacto
+from retroenvases.plantilla import HOJAS, distancia_control_mm, pdf_plantilla
+from retroenvases.sintetico import BOTELLA_600, generar_con_hoja
+from retroenvases.vision import bordes_por_fila, segmentar_grabcut, segmentar_otsu
+from retroenvases.vision_aruco import (SinMarcadores, detectar, estimar_camara,
+                                       rectangulo_envase, reconstruir, segmentar_con_hoja)
 
-st.set_page_config(page_title="Del píxel al volumen", page_icon="🧴", layout="wide")
+st.set_page_config(page_title="Del píxel al volumen", page_icon="🧴", layout="wide",
+                   initial_sidebar_state="collapsed")
 
-LIMITE = 5.0      # criterio del reto: error relativo máximo [%]
-INICIO = pathlib.Path.home()
-CARPETAS = {
-    "Descargas": INICIO / "Downloads",
-    "Escritorio": INICIO / "Desktop",
-    "Imágenes": INICIO / "Pictures",
-    "Documentos": INICIO / "Documents",
+LIMITE = 5.0                      # criterio del reto: error relativo máximo [%]
+ESTRATEGIAS = {
+    "Automática con la hoja (recomendada)": "hoja",
+    "GrabCut con rectángulo manual": "rect",
+    "Umbral de Otsu (solo fondo liso)": "otsu",
 }
-OTRA_CARPETA = "Otra carpeta…"
-EXTENSIONES = {".jpg", ".jpeg", ".png", ".webp"}
 
 
-def _fotos_en(carpeta: pathlib.Path, maximo: int = 60) -> list[pathlib.Path]:
-    """Imágenes de una carpeta (sin subcarpetas), de la más reciente a la más antigua."""
-    try:
-        fotos = [f for f in carpeta.iterdir()
-                 if f.suffix.lower() in EXTENSIONES and f.is_file()]
-    except OSError:                       # sin permiso de lectura, carpeta que desaparece…
-        return []
-    return sorted(fotos, key=lambda f: f.stat().st_mtime, reverse=True)[:maximo]
-
-
-def _ruta_escrita(texto: str) -> pathlib.Path:
-    """Normaliza una ruta pegada: comillas, espacios escapados (\\ ) y ~."""
-    t = texto.strip().strip("'\"").replace("\\ ", " ")
-    return pathlib.Path(t).expanduser()
-
-
-# ─────────────────────────────────────────────────────────── utilidades ──
+# ════════════════════════════════════════════════════════════ utilidades ══
 @st.cache_data(show_spinner=False)
 def _cargar(datos: bytes) -> Foto:
-    return cargar(datos)
+    return cargar(datos, lado_max=1800)
 
 
 @st.cache_data(show_spinner=False)
+def _plantilla(nombre: str) -> bytes:
+    return pdf_plantilla(HOJAS[nombre])
+
+
+@st.cache_data(show_spinner="Generando la foto de ejemplo…")
 def _ejemplo() -> tuple[bytes, dict]:
-    """Foto sintética de una botella de volumen exacto, con cámara a 50 cm."""
-    img, v = generar_perspectiva(BOTELLA_600, Escena(), distancia_cm=50)
+    """Escena sintética: botella de volumen exacto sobre la hoja, cámara a 50 cm."""
+    img, v = generar_con_hoja(BOTELLA_600, distancia_cm=50, altura_camara_cm=28)
     ok, buf = cv2.imencode(".png", img)
-    h, w = img.shape[:2]
-    v["focal_35mm"] = v["focal_px"] * 43.27 / math.hypot(w, h)
-    return buf.tobytes(), v
+    return buf.tobytes(), {"volumen_cm3": v["volumen_cm3"], "altura_cm": v["altura_cm"]}
 
 
 def _rgb(bgr: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
 
-def _con_rectangulo(bgr: np.ndarray, rect) -> np.ndarray:
+def _dibujar_referencia(bgr, marcadores, cam, hoja, escala):
+    """Marcadores detectados, borde de la hoja, círculos guía y eje según la pose."""
     out = bgr.copy()
-    if rect:
-        x, y, w, h = rect
-        grosor = max(2, bgr.shape[0] // 300)
-        cv2.rectangle(out, (x, y), (x + w, y + h), (255, 0, 255), grosor)
+    g = max(2, bgr.shape[0] // 400)
+    for i, c in marcadores.items():
+        cv2.polylines(out, [c.astype(np.int32)], True, (0, 220, 0), g)
+        cv2.circle(out, tuple(c[0].astype(int)), 3 * g, (0, 0, 255), -1)   # esquina 0
+        cv2.putText(out, f"ID {i}", tuple((c.mean(axis=0) + [-30, 10]).astype(int)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6 * g, (0, 0, 255), g)
+    w2, h2 = hoja.ancho_mm / 20 * escala, hoja.alto_mm / 20 * escala
+    borde = cam.proyectar(np.array([[-w2, -h2, 0], [w2, -h2, 0], [w2, h2, 0], [-w2, h2, 0]]))
+    cv2.polylines(out, [borde.astype(np.int32)], True, (255, 160, 0), g)
+    ang = np.linspace(0, 2 * np.pi, 60)
+    for rr in (2.0, 4.0):
+        circ = cam.proyectar(np.column_stack([rr * np.cos(ang), rr * np.sin(ang), 0 * ang]))
+        cv2.polylines(out, [circ.astype(np.int32)], True, (255, 0, 255), g)
+    eje = cam.proyectar(np.array([[0, 0, 0], [0, 0, 30.0]]))
+    cv2.line(out, tuple(eje[0].astype(int)), tuple(eje[1].astype(int)), (255, 0, 255), g)
     return _rgb(out)
 
 
-def _con_contorno(bgr: np.ndarray, mascara: np.ndarray) -> np.ndarray:
+def _con_contorno(bgr, mascara, color=(0, 200, 0)):
     out = bgr.copy()
     m = mascara > 0
-    out[m] = (0.55 * out[m] + 0.45 * np.array([0, 200, 0])).astype(np.uint8)
+    out[m] = (0.55 * out[m] + 0.45 * np.array(color)).astype(np.uint8)
     cs, _ = cv2.findContours(m.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-    cv2.drawContours(out, cs, -1, (0, 255, 255), max(2, bgr.shape[0] // 400))
+    cv2.drawContours(out, cs, -1, (0, 255, 255), max(2, bgr.shape[0] // 500))
     return _rgb(out)
 
 
-def _metodos(z, r, m_gauss, cortes):
-    """Los 4 métodos con su tiempo y sus parámetros; los que no aplican, con el motivo."""
+def _segmentar(estrategia, img, cam, rect, altura):
+    if estrategia == "hoja":
+        return segmentar_con_hoja(img, cam, altura_cm=altura)
+    if estrategia == "rect":
+        return segmentar_grabcut(img, rect=rect)
+    return segmentar_otsu(img)
+
+
+def _perfil(img, cam, mascara, altura):
+    filas, bi, bd, frac = bordes_por_fila(mascara, img=img)
+    return reconstruir(cam, filas, bi, bd, altura), frac
+
+
+def _metodos(z, r, m_gauss, paneles):
+    """Los 4 métodos sobre la misma tabla, con tiempo y parámetros; y los avisos."""
     n, dz = len(z) - 1, float(z[1] - z[0])
-    tabla, avisos = [], []
+    cortes = list(np.linspace(z[0], z[-1], paneles + 1)[1:-1])
+    filas, avisos = [], []
     for nombre, fn, orden, evals, delta in [
         ("Trapecio", lambda: integ.trapecio(z, r), "O(Δz²)", n + 1, dz),
-        ("Simpson", lambda: integ.simpson(z, r), "O(Δz⁴)", n + 1, dz),
+        ("Simpson 1/3", lambda: integ.simpson(z, r), "O(Δz⁴)", n + 1, dz),
         ("Newton-Cotes 3/8", lambda: integ.newton_cotes(z, r, 3), "O(Δz⁴)", n + 1, dz),
-        (f"Gauss-Legendre m={m_gauss}", lambda: integ.gauss(z, r, m_gauss, cortes),
-         f"exacto hasta grado {2 * m_gauss - 1}", m_gauss * (len(cortes) + 1), None),
+        (f"Gauss-Legendre ({m_gauss} pts × {paneles} paneles)",
+         lambda: integ.gauss(z, r, m_gauss, cortes),
+         f"exacta hasta grado {2 * m_gauss - 1}", m_gauss * paneles, None),
     ]:
         try:
             t0 = time.perf_counter()
             I = fn()
             ms = 1000 * (time.perf_counter() - t0)
         except integ.CondicionNoSatisfecha as e:
-            avisos.append(f"**{nombre}** no aplica: {e}")
+            avisos.append(f"**{nombre}** no se puede aplicar: {e}")
             continue
-        tabla.append({"Método": nombre, "n": n, "Evaluaciones": evals,
-                      "a [cm]": float(z[0]), "b [cm]": float(z[-1]),
-                      "Δz [cm]": delta, "Orden / exactitud": orden,
-                      "I = ∫r²dz [cm³]": I, "V = πI [cm³]": math.pi * I,
-                      "Tiempo [ms]": ms})
-    return pd.DataFrame(tabla), avisos
+        filas.append({"Método": nombre, "n (subintervalos)": n, "Puntos usados": evals,
+                      "a [cm]": float(z[0]), "b [cm]": float(z[-1]), "Δz [cm]": delta,
+                      "Orden / exactitud": orden, "Integral ∫r²dz [cm³]": I,
+                      "Volumen π∫r²dz [cm³]": math.pi * I, "Tiempo [ms]": ms})
+    return pd.DataFrame(filas), avisos
 
 
-# ─────────────────────────────────────────────────────────────── página ──
+def _fmt(df):
+    return {c: st.column_config.NumberColumn(format="%.4f")
+            for c in df.columns if df[c].dtype.kind == "f"}
+
+
+# ═══════════════════════════════════════════════════════════════ página ══
 st.title("🧴 Del píxel al volumen")
-st.caption("Estimación del volumen de un envase a partir de una foto, modelándolo como "
-           "sólido de revolución:  V = π ∫ r(z)² dz")
+st.markdown("Estima el volumen de un envase a partir de una foto, modelándolo como un "
+            "**sólido de revolución**:")
+st.latex(r"V = \pi \int_a^b [r(z)]^2 \, dz")
+st.caption("La foto se convierte en una tabla de puntos (zᵢ, rᵢ) en centímetros, y la "
+           "integral se calcula con cuatro métodos numéricos.")
 
-with st.sidebar:
-    st.header("📸 Cómo tomar la foto")
-    st.markdown(
-        "1. **Distancia 40–100 cm**, sin zoom.\n"
-        "2. **Cámara entre la base y la boca** del envase, idealmente a media altura. "
-        "Nunca por encima.\n"
-        "3. **Celular vertical** (usa el nivel de la cámara), o anota su inclinación.\n"
-        "4. **Fondo liso** que contraste con el envase; el envase no debe tocar los "
-        "bordes de la foto.\n"
-        "5. **Mide la altura del envase al medio milímetro.**\n\n"
-        "Si la foto llega por WhatsApp pierde la focal (EXIF): se usa la típica de "
-        "la cámara principal de un celular, 26 mm. Mándala como *Documento* para "
-        "conservarla.")
-    st.divider()
-    st.header("⚙️ Parámetros numéricos")
-    n_usuario = st.number_input(
-        "Subintervalos n (0 = automático)", 0, 5000, 0, step=6,
-        help="Automático: una muestra por fila de píxeles, redondeado a múltiplo de 6 "
-             "(Simpson pide n par y Newton-Cotes 3/8, múltiplo de 3).")
-    m_gauss = st.slider("Nodos de Gauss por panel (m)", 2, 10, 5)
-    paneles = st.slider("Paneles de Gauss", 1, 12, 6,
-                        help="Gauss se aplica por paneles: sobre un perfil con aristas, "
-                             "la regla global falla.")
+# ── antes de empezar ─────────────────────────────────────────────────────
+with st.expander("📄 Antes de empezar: imprime la hoja de referencia y lee cómo tomar la foto"):
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        st.markdown("**1. Imprime la hoja**")
+        tam = st.radio("Tamaño de papel", list(HOJAS), horizontal=True, key="papel_pdf")
+        st.download_button(f"Descargar la hoja ({tam}, PDF)", _plantilla(tam),
+                           file_name=f"hoja_referencia_{tam.lower()}.pdf",
+                           mime="application/pdf", width="stretch")
+        st.markdown(
+            "- Imprime al **100 %**, sin «ajustar a la página».\n"
+            "- Con una regla, mide la distancia **de borde exterior a borde exterior entre "
+            f"los marcadores ID 0 e ID 1** (debería ser {distancia_control_mm(HOJAS[tam]):.1f} mm). "
+            "La vas a escribir abajo: es la referencia de escala de toda la medición.")
+    with c2:
+        st.markdown("**2. Protocolo de captura**")
+        st.markdown(
+            "- **Hoja** plana sobre una mesa, con el borde de los marcadores ID 0 e ID 1 "
+            "hacia la cámara.\n"
+            "- **Envase** de pie, **centrado** en los círculos.\n"
+            "- **Cámara** a 40–70 cm, un poco por encima del envase (a 20–35 cm de la mesa), "
+            "apuntando a él. Deben verse completos al menos los marcadores ID 0 e ID 1.\n"
+            "- **Orientación** vertical u horizontal, la que deje ver mejor envase y hoja.\n"
+            "- **Iluminación** pareja, sin reflejos fuertes sobre la hoja ni sobre el envase.\n"
+            "- **Fondo** detrás del envase lo más liso posible.\n"
+            "- En el celular, para máxima resolución usa **Subir foto → Cámara** (la cámara "
+            "nativa del teléfono) en vez de la cámara del navegador.")
 
-# 1 ── foto ────────────────────────────────────────────────────────────────
-st.subheader("1. La foto")
-fuente = st.radio("Origen", ["Foto de una carpeta", "Subir archivo", "Ejemplo sintético"],
+# ── 1. foto ───────────────────────────────────────────────────────────────
+st.header("1. Foto del envase")
+origen = st.radio("¿De dónde sale la foto?",
+                  ["Tomar foto con la cámara", "Subir foto", "Ejemplo sintético"],
                   horizontal=True)
-datos, verdad, nombre_foto = None, None, None
-if fuente == "Foto de una carpeta":
-    c_carp, c_ruta = st.columns([1, 2])
-    opcion = c_carp.selectbox("Carpeta", [*CARPETAS, OTRA_CARPETA])
-    if opcion == OTRA_CARPETA:
-        texto = c_ruta.text_input(
-            "Ruta de la carpeta", placeholder="/Users/tu_usuario/Fotos/envases",
-            help="En Finder: clic derecho sobre la carpeta con la tecla Opción presionada "
-                 "→ «Copiar … como ruta», y pégala aquí.")
-        carpeta = _ruta_escrita(texto) if texto.strip() else None
-    else:
-        carpeta = CARPETAS[opcion]
-        c_ruta.text_input("Ruta de la carpeta", str(carpeta), disabled=True)
-    if carpeta is None:
-        st.info("Escribe la ruta de la carpeta donde está la foto.")
-    elif not carpeta.is_dir():
-        st.error(f"No existe la carpeta **{carpeta}**.")
-    else:
-        fotos = _fotos_en(carpeta)
-        if not fotos:
-            st.warning(f"No hay imágenes (.jpg, .png, .webp) en **{carpeta}**. "
-                       "Si la carpeta sí tiene fotos, puede que macOS no le haya dado "
-                       "permiso de lectura a la terminal (Ajustes → Privacidad y seguridad "
-                       "→ Archivos y carpetas).")
-        else:
-            elegida = st.selectbox(
-                f"Foto ({len(fotos)} en la carpeta, la más reciente primero)", fotos,
-                format_func=lambda f: f"{f.name}  ·  "
-                                      f"{time.strftime('%d/%m %H:%M', time.localtime(f.stat().st_mtime))}")
-            datos, nombre_foto = elegida.read_bytes(), elegida.name
-elif fuente == "Subir archivo":
-    arch = st.file_uploader("Foto del envase", type=["jpg", "jpeg", "png", "webp"])
+datos, verdad, nombre = None, None, None
+if origen == "Tomar foto con la cámara":
+    st.caption("La cámara del navegador da poca resolución. Si puedes, usa «Subir foto», "
+               "que en el celular abre la cámara nativa con toda su resolución.")
+    cam_in = st.camera_input("Encuadra el envase y la hoja")
+    if cam_in:
+        datos, nombre = cam_in.getvalue(), "foto de la cámara"
+elif origen == "Subir foto":
+    arch = st.file_uploader("Foto (JPG, PNG o WEBP)", type=["jpg", "jpeg", "png", "webp"])
     if arch:
-        datos, nombre_foto = arch.getvalue(), arch.name
+        datos, nombre = arch.getvalue(), arch.name
 else:
     datos, verdad = _ejemplo()
-    nombre_foto = "ejemplo sintético"
-    st.info(f"Botella sintética de volumen exacto **{verdad['volumen_cm3']:.2f} cm³**, "
-            f"fotografiada con una cámara a {verdad['distancia_cm']:.0f} cm. "
-            "Sirve para comprobar que todo funciona.")
-
+    nombre = "ejemplo sintético"
+    st.info(f"Foto sintética de una botella de volumen exacto **{verdad['volumen_cm3']:.2f} cm³** "
+            "sobre la hoja carta, tomada con una cámara a 50 cm. Sirve para comprobar que todo "
+            "funciona sin imprimir nada.")
 if not datos:
     st.stop()
 
 foto = _cargar(datos)
-H_img, W_img = foto.bgr.shape[:2]
-# Los datos que dependen de la foto (altura, focal, referencia) llevan una clave
-# ligada a ella: al cambiar de foto vuelven a su valor inicial en vez de arrastrar
-# los de la anterior.
-clave = str(hash((nombre_foto, datos)))
+img = foto.bgr
+H_img, W_img = img.shape[:2]
+clave = str(hash((nombre, datos)))
 
-st.subheader("2. Altura del envase")
-altura = st.number_input(
-    f"¿Cuánto mide de alto el envase de «{nombre_foto}»? [cm]",
-    min_value=1.0, max_value=80.0,
-    value=float(verdad["altura_cm"]) if verdad else None,
-    step=0.05, format="%.2f", placeholder="Mídelo con una regla, p. ej. 24.35",
-    key=f"altura_{clave}",
-    help="Desde la base hasta el punto más alto, tapa incluida. Es la única referencia "
-         "de escala: su error se multiplica ×3 en el volumen (1 mm de error en una lata "
-         "de 12 cm son 2.5 %).")
-if altura is None:
-    st.warning("📏 **Escribe la altura real del envase** para poder calcular el volumen. "
-               "Mídela con una regla, al medio milímetro.")
-else:
-    st.caption("La escala se obtiene de esta altura: los píxeles que mide la silueta "
-               "corresponden a estos centímetros. Supuesto: el envase es un sólido de "
-               "revolución con su eje vertical.")
+# ── 2. referencia de escala ────────────────────────────────────────────────
+st.header("2. Referencia de escala")
+c1, c2 = st.columns([1, 1])
+with c1:
+    tipo_hoja = st.radio("Hoja usada", list(HOJAS), horizontal=True, key=f"hoja_{clave}")
+    hoja = HOJAS[tipo_hoja]
+    nominal = distancia_control_mm(hoja)
+    medida = st.number_input(
+        "Distancia medida entre los bordes exteriores de ID 0 e ID 1 [mm]",
+        min_value=100.0, max_value=300.0, value=float(nominal), step=0.5, format="%.1f",
+        key=f"medida_{clave}",
+        help=f"Lo nominal es {nominal:.1f} mm. Si la impresora agrandó o achicó la hoja, aquí "
+             "se corrige. Su error se multiplica ×3 en el volumen.")
+    escala = medida / nominal
+    if abs(escala - 1) > 0.002:
+        st.info(f"La hoja salió impresa al **{100 * escala:.1f} %**: se corrige con tu medida.")
+    altura_medida = st.number_input(
+        "Altura del envase medida con regla [cm] (opcional, sirve de control)",
+        min_value=0.0, max_value=80.0, value=0.0, step=0.1, format="%.1f",
+        key=f"altura_{clave}",
+        help="No fija la escala: si la escribes, el perfil se cierra a esa altura y se compara "
+             "con la que estima la foto. 0 = estimarla de la foto.") or None
 
-# 2 ── escala y selección ───────────────────────────────────────────────────
-col_izq, col_der = st.columns([1, 1])
-with col_izq:
-    st.subheader("3. Selección del envase")
-    metodo = st.radio("Segmentación", ["GrabCut con rectángulo (recomendado)",
-                                       "GrabCut automático", "Otsu (solo fondo liso)"])
+marcadores = detectar(img)
+cam, error_cam = None, None
+try:
+    cam = estimar_camara(img.shape, marcadores, hoja, lado_medido_mm=hoja.lado_mm * escala,
+                         focal_px_inicial=foto.focal_px())
+except SinMarcadores as e:
+    error_cam = str(e)
+
+with c2:
+    if cam is None:
+        st.image(_rgb(img), caption="Foto", width="stretch")
+    else:
+        st.image(_dibujar_referencia(img, marcadores, cam, hoja, escala),
+                 caption="Verde: marcadores detectados (punto rojo = su primera esquina). "
+                         "Naranja: borde de la hoja reconstruido. Magenta: círculos guía y eje "
+                         "del envase según la pose de la cámara.", width="stretch")
+if cam is None:
+    st.error(f"No se puede fijar la escala: {error_cam}")
+    st.stop()
+if len(cam.marcadores) < 2:
+    st.warning("Solo se detectó un marcador: la focal de la cámara no se puede medir y se "
+               "supone la típica de un celular. Repite la foto con ID 0 e ID 1 visibles.")
+
+C = cam.centro
+with st.expander("¿Cómo se pasa de píxeles a centímetros? (referencia, coordenadas, conversión "
+                 "y supuestos)", expanded=True):
+    st.markdown(f"""
+**Referencia física.** Los cuatro cuadrados negros (marcadores ArUco) de la hoja
+{tipo_hoja.lower()}. Sus esquinas tienen posiciones conocidas sobre la hoja.
+
+**Longitud conocida.** La distancia entre los bordes exteriores de ID 0 e ID 1, que mediste:
+**{medida:.1f} mm** (nominal {nominal:.1f} mm). Todas las posiciones de la hoja se escalan con
+ella; cada cuadrado mide {hoja.lado_mm * escala:.2f} mm.
+
+**Coordenadas en píxeles.** El programa detecta automáticamente los marcadores
+({", ".join(f"ID {i}" for i in cam.marcadores)}) y ubica sus esquinas con precisión de
+décimas de píxel. Así tiene {4 * len(cam.marcadores)} pares (píxel ↔ posición en la hoja).
+
+**De píxeles a centímetros.** Con esos pares se resuelve el modelo de la cámara (cámara
+estenopeica o *pinhole*). Se obtienen:
+- la **focal** de la cámara: **{cam.focal_px:.0f} px** ({"medida en la propia foto" if cam.focal_estimada else "supuesta"});
+- su **posición**: a **{math.hypot(C[0], C[1]):.1f} cm** del envase en horizontal y a
+  **{C[2]:.1f} cm** sobre la mesa, mirando **{cam.inclinacion_grados:.1f}°** hacia abajo;
+- el **error de reproyección** de las esquinas: **{cam.error_px:.2f} px**.
+
+Con eso, cada píxel de la foto es un **rayo** en el espacio, en centímetros. El borde del
+envase en cada fila es un rayo tangente a su superficie: su punto más cercano al eje da el
+radio r y la altura z reales. Es una conversión en 3D, no un simple factor px → cm, porque
+la parte del envase más cercana a la cámara se ve más grande (perspectiva).
+
+**Supuestos.** La hoja está plana sobre la mesa; el envase está de pie sobre ella, con su
+eje vertical y centrado en los círculos; el envase es un sólido de revolución; el lente no
+deforma la imagen (los celulares ya corrigen la distorsión) y su centro óptico está en el
+centro de la foto.
+""")
+
+# ── 3. extracción del perfil ───────────────────────────────────────────────
+st.header("3. Extracción del perfil")
+c1, c2 = st.columns([1, 1])
+with c1:
+    nombre_estr = st.radio("Estrategia para extraer el contorno", list(ESTRATEGIAS))
+    estrategia = ESTRATEGIAS[nombre_estr]
+    rect_auto = rectangulo_envase(cam, img.shape, altura_cm=altura_medida)
     rect = None
-    if metodo.startswith("GrabCut con"):
-        rx = st.slider("Rectángulo: horizontal [%]", 0, 100, (25, 75), key=f"rx_{clave}")
-        ry = st.slider("Rectángulo: vertical [%]", 0, 100, (5, 95), key=f"ry_{clave}")
+    if estrategia == "rect":
+        x, y, w, h = rect_auto
+        rx = st.slider("Rectángulo: horizontal [%]", 0, 100,
+                       (int(100 * x / W_img), int(100 * (x + w) / W_img)), key=f"rx_{clave}")
+        ry = st.slider("Rectángulo: vertical [%]", 0, 100,
+                       (int(100 * y / H_img), int(100 * (y + h) / H_img)), key=f"ry_{clave}")
         rect = (int(rx[0] / 100 * W_img), int(ry[0] / 100 * H_img),
                 int((rx[1] - rx[0]) / 100 * W_img), int((ry[1] - ry[0]) / 100 * H_img))
-        st.caption("Ajusta el rectángulo para que contenga todo el envase y lo menos "
-                   "posible del resto.")
+    comparar = st.checkbox("Comparar las tres estrategias", key=f"cmp_{clave}")
+    st.caption(
+        "**Automática con la hoja:** GrabCut (modelos de color del objeto y del fondo, "
+        "separados por cortes de grafo) iniciado con la geometría: lo que está delante del "
+        "envase sobre la hoja es fondo seguro y el eje es objeto seguro. "
+        "**Rectángulo manual:** GrabCut a partir de un rectángulo que ajustas. "
+        "**Otsu:** un umbral elegido automáticamente sobre el histograma; solo sirve con "
+        "fondo liso.")
 
-    st.subheader("4. Perspectiva")
-    corregir = st.checkbox("Corregir perspectiva", True,
-                           help="Sin corregir, a 50 cm el volumen sale ~10 % bajo.")
-    f35 = pitch = None
-    if corregir:
-        if verdad:
-            st.success(f"Ejemplo sintético: focal conocida, "
-                       f"**{verdad['focal_35mm']:.1f} mm** equivalente 35 mm.")
-        elif foto.focal_35mm:
-            st.success(f"Focal leída de la foto: **{foto.focal_35mm:.0f} mm** "
-                       f"(equivalente 35 mm){' · ' + foto.modelo if foto.modelo else ''}")
-        else:
-            st.info("La foto no trae la focal (EXIF), lo normal si llegó por WhatsApp. "
-                    "Se usa **26 mm**, la típica de la cámara principal de un celular; "
-                    "si conoces la de tu teléfono, cámbiala. Un error de ±10 % en la "
-                    "focal mete hasta 2.4 % en el volumen.")
-        f35 = st.number_input("Focal equivalente 35 mm [mm]", 10.0, 200.0,
-                              float(foto.focal_35mm or (verdad or {}).get("focal_35mm") or 26.0),
-                              step=0.5, format="%.1f", key=f"focal_{clave}")
-        pitch = st.number_input("Inclinación del celular [°] (+ = apunta hacia abajo)",
-                                -30.0, 30.0, 0.0, step=0.5, key=f"pitch_{clave}")
-    referencia = st.number_input(
-        "Volumen de referencia [cm³] (opcional, para comparar)", 0.0, 100000.0,
-        float(verdad["volumen_cm3"]) if verdad else 0.0, step=1.0, key=f"ref_{clave}",
-        help="Un volumen conocido del mismo envase: por ejemplo, calculado con regla para "
-             "un cilindro (π r² h). 0 = no comparar.")
-
-with col_der:
-    st.image(_con_rectangulo(foto.bgr, rect), caption=f"Foto de trabajo · {W_img}×{H_img} px",
-             width="stretch")
-
-calcular = st.button("Calcular volumen", type="primary", width="stretch",
-                     disabled=altura is None,
-                     help="Escribe primero la altura del envase." if altura is None else None)
-if calcular:
-    seg = "otsu" if metodo.startswith("Otsu") else "grabcut"
+with st.spinner("Extrayendo el contorno y reconstruyendo el perfil…"):
     try:
-        with st.spinner("Segmentando y reconstruyendo el perfil…"):
-            est = estimar_volumen(
-                foto.bgr, altura, seg, n=int(n_usuario) or None, m_gauss=m_gauss,
-                paneles_gauss=paneles, rect=rect,
-                focal_px=foto.focal_px(f35) if corregir else None,
-                pitch_grados=pitch or 0.0)
-        st.session_state["est"] = est
-        st.session_state["ref"] = referencia
-        st.session_state["clave_est"] = clave
-        st.session_state["rect_est"] = rect
-    except Exception as e:           # un fallo aquí es de datos, no del usuario
-        st.error(f"No se pudo estimar el volumen: {e}")
-        st.session_state.pop("est", None)
+        mascara = _segmentar(estrategia, img, cam, rect, altura_medida)
+        perfil, frac_sub = _perfil(img, cam, mascara, altura_medida)
+    except Exception as e:                           # contorno inservible
+        st.error(f"No se pudo extraer el perfil con esta estrategia: {e}. Prueba otra, o "
+                 "repite la foto siguiendo el protocolo.")
+        st.stop()
 
-est = st.session_state.get("est")
-if est is None or st.session_state.get("clave_est") != clave:
-    st.stop()
+with c2:
+    st.image(_con_contorno(img, mascara), caption="Contorno usado", width="stretch")
 
-# 5 ── resultados ─────────────────────────────────────────────────────────
-st.divider()
-st.subheader("5. Resultados")
-z, r = est.z_cm, est.r_cm
-cortes = list(np.linspace(z[0], z[-1], paneles + 1)[1:-1])
-tabla, avisos = _metodos(z, r, m_gauss, cortes)
-ref = st.session_state.get("ref") or 0.0
-if ref > 0:
-    tabla["Diferencia [cm³]"] = tabla["V = πI [cm³]"] - ref
-    tabla["Error relativo [%]"] = 100 * tabla["Diferencia [cm³]"].abs() / ref
-
-p = est.perfil
-alertas = []
-if p.asimetria > 0.03:
-    alertas.append("La silueta es asimétrica (> 3 %): puede no ser un sólido de revolución, "
-                   "o el contorno tomó parte del fondo. Revisa el contorno y el rectángulo.")
-if p.subpixel < 0.5:
-    alertas.append("Menos de la mitad de los bordes se refinaron con precisión subpíxel "
-                   "(fondo no uniforme). El borde tiene precisión de ~1 px.")
-ys, xs = np.nonzero(p.mascara)
-if ys.size and (ys.min() <= 1 or xs.min() <= 1 or ys.max() >= p.mascara.shape[0] - 2
-                or xs.max() >= p.mascara.shape[1] - 2):
-    alertas.append("El contorno toca el borde de la foto: probablemente incluye fondo, o el "
-                   "envase quedó cortado.")
-if est.perspectiva:
-    if est.perspectiva.altura_camara_cm > altura:
-        alertas.append("La cámara estaba por encima de la boca del envase: la corrección de "
-                       "perspectiva pierde precisión (hasta ~5 %). Repite la foto más abajo.")
-    if est.perspectiva.distancia_cm < 35:
-        alertas.append("La cámara estaba a menos de 35 cm: aléjate a 40–100 cm.")
-no_confiable = []
-rect_usado = st.session_state.get("rect_est")
-if rect_usado and est.perfil.rotacion is None:
-    x, y, w, h = rect_usado
-    ys_m, xs_m = np.nonzero(p.mascara)
-    toca = (ys_m.min() <= y + 1 or ys_m.max() >= y + h - 2 or
-            xs_m.min() <= x + 1 or xs_m.max() >= x + w - 2) if ys_m.size else False
-    if toca:
-        no_confiable.append("el contorno toca el rectángulo: probablemente el rectángulo "
-                            "corta el envase. Agrándalo para que lo contenga entero")
-if p.asimetria > 0.05:
-    no_confiable.append(f"la silueta es muy asimétrica ({100 * p.asimetria:.0f} %): el "
-                        "contorno casi seguro incluye fondo. Ajusta el rectángulo")
-if est.perspectiva and est.perspectiva.distancia_cm < 25:
-    no_confiable.append("la cámara estaba muy cerca (< 25 cm)")
-if no_confiable:
-    st.error("⚠️ **Resultado no confiable:** " + "; ".join(no_confiable) + ".")
-
-principal = tabla.iloc[0]
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Volumen (trapecio)", f"{principal['V = πI [cm³]']:.1f} cm³")
-c2.metric("= mililitros", f"{principal['V = πI [cm³]']:.1f} mL")
-c3.metric("Δz", f"{principal['Δz [cm]']:.4f} cm")
-if ref > 0:
-    err = principal["Error relativo [%]"]
-    c4.metric("Error vs referencia", f"{err:.2f} %",
-              "dentro del 5 %" if err < LIMITE else "fuera del 5 %",
-              delta_color="normal" if err < LIMITE else "inverse")
-
-g1, g2 = st.columns(2)
-with g1:
-    mascara = est.perfil.mascara
-    if est.perfil.rotacion is not None:          # deshacer el enderezado para superponer
-        inv = cv2.invertAffineTransform(est.perfil.rotacion)
-        mascara = cv2.warpAffine(mascara, inv, (W_img, H_img), flags=cv2.INTER_NEAREST)
-    st.image(_con_contorno(foto.bgr, mascara), caption="Contorno detectado",
-             width="stretch")
-with g2:
-    fig, ax = plt.subplots(2, 1, figsize=(6, 6.4))
-    ax[0].fill_between(z, -r, r, alpha=.3, color="#1f77b4")
-    ax[0].plot(z, r, z, -r, color="#1f77b4", lw=1.6)
-    ax[0].axhline(0, ls="--", color="#d62728", lw=1)
-    ax[0].set(xlabel="z [cm]", ylabel="radio [cm]", title="Perfil en coordenadas físicas")
-    ax[0].set_aspect("equal", adjustable="datalim")
-    ax[1].fill_between(z, 0, math.pi * r ** 2, alpha=.3, color="#2ca02c")
-    ax[1].plot(z, math.pi * r ** 2, color="#2ca02c", lw=1.6)
-    ax[1].set(xlabel="z [cm]", ylabel="π·r(z)² [cm²]",
-              title="Integrando: el volumen es el área bajo la curva")
-    for a in ax:
-        a.grid(alpha=.3)
-    fig.tight_layout()
+z_full, r_full = perfil.z_cm, perfil.r_cm
+H = perfil.altura_cm
+fig, ax = plt.subplots(figsize=(5.5, 6))
+ax.fill_betweenx(z_full, -r_full, r_full, color="#1f77b4", alpha=.18)
+ax.plot(r_full, z_full, "-", color="#1f77b4", lw=1.2)
+ax.plot(-r_full, z_full, "-", color="#1f77b4", lw=1.2)
+paso = max(1, len(z_full) // 60)
+ax.plot(r_full[::paso], z_full[::paso], "o", ms=3, color="#d62728", label="puntos (zᵢ, rᵢ)")
+ax.axvline(0, ls="--", color="gray", lw=1)
+ax.set(xlabel="r [cm]", ylabel="z [cm]", title="Perfil en coordenadas físicas")
+ax.set_aspect("equal")
+ax.legend(fontsize=8, loc="lower right")
+ax.grid(alpha=.3)
+fig.tight_layout()
+c1, c2 = st.columns([1, 1])
+with c1:
     st.pyplot(fig)
+with c2:
+    st.metric("Altura del envase (de la foto)", f"{perfil.altura_estimada_cm:.2f} cm")
+    if altura_medida:
+        dif = perfil.altura_estimada_cm - altura_medida
+        st.metric("Altura medida con regla", f"{altura_medida:.2f} cm", f"{dif:+.2f} cm vs foto",
+                  delta_color="off")
+    st.metric("Radio máximo", f"{r_full.max():.2f} cm")
+    st.metric("Asimetría izquierda/derecha", f"{100 * perfil.asimetria:.1f} %")
+    st.metric("Bordes con precisión subpíxel", f"{100 * frac_sub:.0f} %")
+    st.caption(f"Puntos del contorno: {len(z_full)} (uno por fila de píxeles). Eje ubicado a "
+               f"{10 * math.hypot(*perfil.eje_cm):.1f} mm del centro del círculo.")
 
-st.markdown("**Comparación de los cuatro métodos** (todos sobre la misma tabla de datos)")
-st.dataframe(tabla, hide_index=True, width="stretch",
-             column_config={c: st.column_config.NumberColumn(format="%.4f")
-                            for c in tabla.columns if tabla[c].dtype.kind == "f"})
-for a in avisos:
-    st.warning(a)
+if comparar:
+    st.subheader("Comparación de estrategias")
+    cols = st.columns(3)
+    for col, (nom, est) in zip(cols, ESTRATEGIAS.items()):
+        with col:
+            try:
+                m = _segmentar(est, img, cam, rect or rect_auto, altura_medida)
+                p, _ = _perfil(img, cam, m, altura_medida)
+                zz, rr = integ.remuestrear(p.z_cm, p.r_cm, integ.n_compatible(len(p.z_cm) - 1))
+                v = math.pi * integ.trapecio(zz, rr)
+                st.image(_con_contorno(img, m), width="stretch")
+                st.markdown(f"**{nom.split(' (')[0]}**: {v:.1f} cm³ · asimetría "
+                            f"{100 * p.asimetria:.1f} %")
+            except Exception as e:
+                st.markdown(f"**{nom.split(' (')[0]}**: falló ({e})")
 
-fig, ax = plt.subplots(figsize=(9, 2.8))
-ax.barh(tabla["Método"], tabla["V = πI [cm³]"], color="#4c72b0", alpha=.85)
-if ref > 0:
-    ax.axvline(ref, color="k", lw=1.5, label="referencia")
-    ax.axvspan(ref * (1 - LIMITE / 100), ref * (1 + LIMITE / 100), color="green", alpha=.1,
-               label="±5 %")
-    ax.legend(fontsize=8)
-vmin = tabla["V = πI [cm³]"].min()
-ax.set_xlim(vmin * 0.9, max(tabla["V = πI [cm³]"].max(), ref) * 1.08)
+# ── 4. intervalo y discretización ─────────────────────────────────────────
+st.header("4. Intervalo y discretización")
+c1, c2, c3 = st.columns(3)
+with c1:
+    ab = st.slider("Intervalo [a, b] en z [cm]", 0.0, float(round(H, 2)),
+                   (0.0, float(round(H, 2))), step=0.05, key=f"ab_{clave}",
+                   help="Por defecto, todo el envase. Un intervalo menor da el volumen de ese tramo.")
+with c2:
+    n_auto = integ.n_compatible(len(z_full) - 1)
+    n = int(st.number_input("Subintervalos n", 1, 20000, n_auto, step=1, key=f"n_{clave}",
+                            help="Por defecto, uno por fila de píxeles, redondeado a múltiplo de 6 "
+                                 "(Simpson necesita n par y Newton-Cotes 3/8, múltiplo de 3)."))
+with c3:
+    m_gauss = st.slider("Puntos de Gauss por panel (orden)", 2, 12, 5)
+    paneles = st.slider("Paneles de Gauss", 1, 12, 6)
+a, b = ab
+if b - a < 0.1:
+    st.error("El intervalo es demasiado corto.")
+    st.stop()
+dentro = (z_full > a) & (z_full < b)
+zs = np.concatenate([[a], z_full[dentro], [b]])
+rs = np.interp(zs, z_full, r_full)
+z, r = integ.remuestrear(zs, rs, n)
+dz = (b - a) / n
+st.markdown(f"**Δz = (b − a)/n = ({b:.2f} − {a:.2f}) / {n} = {dz:.5f} cm** · malla uniforme de "
+            f"{n + 1} puntos.")
+st.caption("Los puntos del contorno salen de las filas de píxeles y no quedan equiespaciados "
+           "en z (la perspectiva estira unas filas más que otras). Por eso se **remuestrean** "
+           "a una malla uniforme por interpolación lineal, que no inventa oscilaciones cerca de "
+           "las aristas del envase. Así los cuatro métodos usan exactamente la misma tabla.")
+
+# ── 5. tabla de datos ───────────────────────────────────────────────────────
+st.header("5. Tabla de datos")
+tabla_datos = pd.DataFrame({"i": np.arange(len(z)), "zᵢ [cm]": z, "rᵢ [cm]": r,
+                            "rᵢ² [cm²]": r ** 2, "f(zᵢ) = π·rᵢ² [cm²]": math.pi * r ** 2})
+st.dataframe(tabla_datos, hide_index=True, width="stretch", height=260,
+             column_config=_fmt(tabla_datos))
+
+# ── 6. integración y comparación ─────────────────────────────────────────────
+st.header("6. Integración numérica")
+tabla, avisos = _metodos(z, r, m_gauss, paneles)
+for av in avisos:
+    st.warning(av)
+if tabla.empty:
+    st.error("Ningún método se pudo aplicar con estos parámetros.")
+    st.stop()
+V_principal = float(tabla.iloc[0]["Volumen π∫r²dz [cm³]"])
+c1, c2, c3 = st.columns(3)
+c1.metric("Volumen (trapecio)", f"{V_principal:.1f} cm³")
+c2.metric("En mililitros", f"{V_principal:.1f} mL")
+c3.metric("Diferencia entre métodos",
+          f"{tabla['Volumen π∫r²dz [cm³]'].max() - tabla['Volumen π∫r²dz [cm³]'].min():.2f} cm³")
+st.dataframe(tabla, hide_index=True, width="stretch", column_config=_fmt(tabla))
+
+fig, ax = plt.subplots(figsize=(8, 2.6))
+ax.barh(tabla["Método"], tabla["Volumen π∫r²dz [cm³]"], color="#4c72b0", alpha=.85)
+vmin, vmax = tabla["Volumen π∫r²dz [cm³]"].min(), tabla["Volumen π∫r²dz [cm³]"].max()
+ax.set_xlim(vmin - max(0.03 * vmin, 1), vmax + max(0.03 * vmax, 1))
 ax.set(xlabel="volumen [cm³]", title="Volumen por método")
 ax.grid(axis="x", alpha=.3)
 fig.tight_layout()
 st.pyplot(fig)
 
-# 6 ── diagnóstico ────────────────────────────────────────────────────────
-st.subheader("6. Diagnóstico de la medición")
-d1, d2, d3, d4 = st.columns(4)
-d1.metric("Escala (sin perspectiva)", f"{p.px_por_cm:.2f} px/cm")
-d2.metric("Inclinación corregida", f"{p.inclinacion_grados:+.2f}°")
-d3.metric("Asimetría izq./der.", f"{100 * p.asimetria:.1f} %")
-d4.metric("Bordes con precisión subpíxel", f"{100 * p.subpixel:.0f} %")
-if est.perspectiva:
-    e1, e2 = st.columns(2)
-    e1.metric("Distancia estimada de la cámara", f"{est.perspectiva.distancia_cm:.1f} cm")
-    e2.metric("Altura estimada de la cámara", f"{est.perspectiva.altura_camara_cm:.1f} cm")
-
-for a in alertas:
-    st.warning(a)
-if not alertas:
-    st.success("Sin alertas: la foto cumple las condiciones del modelo.")
-
-# 7 ── datos para el informe ──────────────────────────────────────────────
-with st.expander("Tabla de datos (zᵢ, rᵢ, rᵢ², π·rᵢ²) — Etapa 4"):
-    datos_tabla = pd.DataFrame({"i": np.arange(len(z)), "z_i [cm]": z, "r_i [cm]": r,
-                                "r_i² [cm²]": r ** 2, "π·r_i² [cm²]": math.pi * r ** 2})
-    st.dataframe(datos_tabla, hide_index=True, width="stretch", height=320)
-    st.caption("Selecciona celdas y copia (Ctrl/Cmd + C) para pegarlas en el informe.")
-
-with st.expander("Resultados en texto, para copiar al informe"):
-    st.code(tabla.to_csv(index=False, float_format="%.6f"), language="text")
-
-with st.expander("Fuentes de error y cómo se atienden"):
+with st.expander("Análisis de cada método (efecto de Δz, condiciones sobre n, orden de Gauss)"):
+    ns = sorted({max(12, int(12 * round(k / 12))) for k in np.geomspace(12, max(24, n), 9)})
+    filas_conv = []
+    for nn in ns:
+        zz, rr = integ.remuestrear(zs, rs, nn)
+        fila = {"n": nn, "Δz [cm]": (b - a) / nn}
+        for nom, fn in (("Trapecio", integ.trapecio), ("Simpson 1/3", integ.simpson),
+                        ("Newton-Cotes 3/8", lambda q, w: integ.newton_cotes(q, w, 3)),
+                        ("Boole (Newton-Cotes 4)", lambda q, w: integ.newton_cotes(q, w, 4))):
+            fila[nom] = math.pi * fn(zz, rr)
+        filas_conv.append(fila)
+    conv = pd.DataFrame(filas_conv)
+    fig, axs = plt.subplots(1, 2, figsize=(11, 3.6))
+    for nom in ("Trapecio", "Simpson 1/3", "Newton-Cotes 3/8", "Boole (Newton-Cotes 4)"):
+        axs[0].plot(conv["Δz [cm]"], conv[nom], "o-", ms=4, label=nom)
+    axs[0].set(xscale="log", xlabel="Δz [cm]", ylabel="volumen [cm³]",
+               title="Efecto de Δz (Newton-Cotes)")
+    axs[0].legend(fontsize=7)
+    ms_ = list(range(1, 13))
+    cortes_g = list(np.linspace(z[0], z[-1], paneles + 1)[1:-1])
+    vg = [math.pi * integ.gauss(z, r, mm, cortes_g) for mm in ms_]
+    vg1 = [math.pi * integ.gauss(z, r, mm, None) for mm in ms_]
+    axs[1].plot(ms_, vg, "o-", ms=4, label=f"{paneles} paneles")
+    axs[1].plot(ms_, vg1, "s--", ms=4, label="1 panel (global)")
+    axs[1].set(xlabel="puntos de Gauss por panel", ylabel="volumen [cm³]",
+               title="Influencia del orden de cuadratura")
+    axs[1].legend(fontsize=7)
+    for a_ in axs:
+        a_.grid(alpha=.3)
+    fig.tight_layout()
+    st.pyplot(fig)
+    st.dataframe(conv, hide_index=True, width="stretch", column_config=_fmt(conv))
     st.markdown(
-        "| Fuente | Efecto en el volumen | Cómo se atiende |\n"
-        "|---|---|---|\n"
-        "| Altura medida con regla | **×3** su error relativo | Medir al medio milímetro |\n"
-        "| Perspectiva de la cámara | −5 % a −25 % sin corregir | Corrección con la focal "
-        "(residuo ≤ 1 % a 35–200 cm) |\n"
-        "| Celular inclinado | hasta 6 % a ±10° | Informar la inclinación, o nivelar |\n"
-        "| Focal equivocada | hasta 2.4 % con ±10 % | Subir la foto original (EXIF) |\n"
-        "| Contorno (1 px de borde) | ~2× el error de radio | Fondo liso, rectángulo, subpíxel |\n"
-        "| Envase no simétrico | variable | Se reporta la asimetría |\n"
-        "| Método de integración | < 0.05 % | Irrelevante frente a lo anterior |")
+        "- **Trapecio:** su error baja como Δz²; aquí el volumen apenas cambia al refinar porque "
+        "con un punto por fila de píxeles Δz ya es muy pequeño.\n"
+        "- **Simpson 1/3** necesita **n par**; **Newton-Cotes 3/8**, n múltiplo de 3; **Boole**, "
+        "múltiplo de 4. Con aristas en el perfil (hombro, base) su orden alto no se cumple y "
+        "quedan cerca del trapecio.\n"
+        "- **Gauss:** con un solo panel global, un polinomio debe describir todo el envase y el "
+        "resultado oscila con el orden; por paneles converge enseguida.")
+
+# ── 7. validación y fuentes de error ─────────────────────────────────────────
+st.header("7. Validación y fuentes de error")
+ref = st.number_input("Volumen de referencia del envase [cm³] (opcional)", 0.0, 100000.0,
+                      float(verdad["volumen_cm3"]) if verdad else 0.0, step=1.0,
+                      key=f"ref_{clave}",
+                      help="Un volumen conocido de forma independiente: por ejemplo, un cilindro "
+                           "medido con regla (π·r²·h). 0 = no comparar.")
+intervalo_completo = a <= 0.01 and b >= round(H, 2) - 0.01
+if ref > 0 and not intervalo_completo:
+    st.info(f"El intervalo elegido, [{a:.2f}, {b:.2f}] cm, no cubre todo el envase: su volumen "
+            "es el de ese tramo y no se compara con la referencia, que es del envase completo.")
+if ref > 0 and intervalo_completo:
+    tabla_val = tabla[["Método", "Volumen π∫r²dz [cm³]"]].copy()
+    tabla_val["Diferencia absoluta [cm³]"] = tabla_val["Volumen π∫r²dz [cm³]"] - ref
+    tabla_val["Error relativo [%]"] = 100 * tabla_val["Diferencia absoluta [cm³]"].abs() / ref
+    st.dataframe(tabla_val, hide_index=True, width="stretch", column_config=_fmt(tabla_val))
+    err = float(tabla_val.iloc[0]["Error relativo [%]"])
+    (st.success if err < LIMITE else st.error)(
+        f"Error del trapecio frente a la referencia: **{err:.2f} %** "
+        f"({'dentro' if err < LIMITE else 'fuera'} del criterio del {LIMITE:.0f} %).")
+
+# presupuesto de error de ESTA medición
+px_cm = float(np.linalg.norm(np.diff(
+    cam.proyectar(np.array([[0, 0, H / 2], [1, 0, H / 2]])), axis=0)))
+lado_px = float(np.median([np.linalg.norm(c[1] - c[0]) for c in marcadores.values()]))
+r_med = float(np.median(r_full))
+fuentes = pd.DataFrame([
+    {"Fuente": "Escala: medida de la hoja (±0.5 mm)",
+     "Error estimado en V [%]": 3 * 100 * 0.5 / medida,
+     "Cómo se reduce": "Medir con cuidado la distancia ID 0 – ID 1"},
+    {"Fuente": "Pose de la cámara (reproyección)",
+     "Error estimado en V [%]": 3 * 100 * cam.error_px / max(lado_px, 1),
+     "Cómo se reduce": "Marcadores nítidos, más marcadores visibles"},
+    {"Fuente": "Extracción del contorno (borde)",
+     "Error estimado en V [%]": 2 * 100 * (0.3 if frac_sub > 0.5 else 0.7) / max(r_med * px_cm, 1),
+     "Cómo se reduce": "Fondo liso, buen contraste, más resolución"},
+    {"Fuente": "Forma: asimetría izq./der.",
+     "Error estimado en V [%]": 100 * perfil.asimetria,
+     "Cómo se reduce": "Envase de revolución, bien centrado"},
+    {"Fuente": "Discretización y método numérico",
+     "Error estimado en V [%]": 100 * (tabla["Volumen π∫r²dz [cm³]"].max()
+                                      - tabla["Volumen π∫r²dz [cm³]"].min()) / V_principal,
+     "Cómo se reduce": "Más puntos (n); en la práctica ya es despreciable"},
+])
+total = float(np.sqrt((fuentes["Error estimado en V [%]"] ** 2).sum()))
+st.markdown(f"**Presupuesto de error de esta medición** · combinado (raíz de la suma de "
+            f"cuadrados): **± {total:.1f} %**")
+st.dataframe(fuentes, hide_index=True, width="stretch", column_config=_fmt(fuentes))
+dom = fuentes.loc[fuentes["Error estimado en V [%]"].idxmax(), "Fuente"]
+st.caption(f"Fuente dominante: **{dom}**. La escala pesa ×3 (afecta a r y a z), el borde ×2 "
+           "(solo a r²). El método numérico es, con diferencia, lo que menos pesa. Además hay "
+           "un sesgo de ~+1 % en envases con base acampanada vista desde arriba (medido en "
+           "pruebas sintéticas).")
+alertas = []
+if perfil.asimetria > 0.05:
+    alertas.append("La silueta es muy asimétrica: el contorno puede incluir fondo.")
+if math.hypot(*perfil.eje_cm) > 0.5:
+    alertas.append("El envase parece descentrado más de 5 mm: céntralo en los círculos.")
+if cam.error_px > 1.5:
+    alertas.append("Los marcadores se reproyectan con error alto: puede que la hoja no esté plana.")
+for al in alertas:
+    st.warning(al)
+
+# ── 8. datos para el informe ─────────────────────────────────────────────────
+st.header("8. Datos para el informe")
+st.caption("Cada bloque tiene un botón para copiar.")
+with st.expander("Resultados de los métodos (CSV)"):
+    st.code(tabla.to_csv(index=False, float_format="%.6f"), language="text")
+with st.expander("Tabla de datos zᵢ, rᵢ, rᵢ², πrᵢ² (CSV)"):
+    st.code(tabla_datos.to_csv(index=False, float_format="%.6f"), language="text")
+with st.expander("Resumen de la medición"):
+    st.code(
+        f"Hoja: {tipo_hoja} · distancia ID0–ID1 medida {medida:.1f} mm (escala {100 * escala:.2f} %)\n"
+        f"Cámara: focal {cam.focal_px:.0f} px · distancia {math.hypot(C[0], C[1]):.1f} cm · "
+        f"altura {C[2]:.1f} cm · inclinación {cam.inclinacion_grados:.1f}° · "
+        f"reproyección {cam.error_px:.2f} px\n"
+        f"Contorno: {nombre_estr} · asimetría {100 * perfil.asimetria:.1f} % · "
+        f"subpíxel {100 * frac_sub:.0f} %\n"
+        f"Altura estimada {perfil.altura_estimada_cm:.2f} cm"
+        + (f" · medida {altura_medida:.2f} cm" if altura_medida else "") + "\n"
+        f"Intervalo [{a:.2f}, {b:.2f}] cm · n = {n} · Δz = {dz:.5f} cm\n"
+        f"Volumen (trapecio) {V_principal:.2f} cm³ · presupuesto de error ±{total:.1f} %"
+        + (f"\nReferencia {ref:.2f} cm³ · error {abs(V_principal - ref) / ref * 100:.2f} %"
+           if ref > 0 and intervalo_completo else ""),
+        language="text")
