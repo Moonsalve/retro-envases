@@ -476,3 +476,73 @@ def _radio_borde(cortes: list[np.ndarray], arco: np.ndarray, z_borde: float,
     if cerca.sum() >= 3:
         return float(np.median(r[cerca]))
     return previo
+
+
+def _cruce_local(fila: np.ndarray, i0: int, hacia_afuera: int) -> float | None:
+    """Borde subpíxel con un modelo de mezcla LOCAL (sirve con cualquier fondo).
+
+    `fila` es la fila de la imagen en color (ancho, 3). Se toma el color de afuera
+    (4–10 px fuera del borde entero i0) y el de adentro (3–8 px dentro). Cada píxel
+    cercano se proyecta sobre el segmento afuera→adentro: su posición α es la
+    fracción del píxel cubierta por el objeto (0 fuera, 1 dentro). El borde real
+    está donde α = 0.5. No depende de un color de fondo global, así que funciona
+    delante de un marcador negro o de una hoja blanca por igual.
+    """
+    n = len(fila)
+    afuera = [i0 + hacia_afuera * k for k in range(4, 11)]
+    adentro = [i0 - hacia_afuera * k for k in range(3, 9)]
+    if min(afuera + adentro) < 0 or max(afuera + adentro) >= n:
+        return None
+    c_f = np.median(fila[afuera], axis=0)
+    c_o = np.median(fila[adentro], axis=0)
+    eje = c_o - c_f
+    norma2 = float(eje @ eje)
+    if norma2 < 15.0 ** 2:                        # contraste insuficiente
+        return None
+    idx = np.arange(i0 - hacia_afuera * 4, i0 + hacia_afuera * 5, hacia_afuera)
+    idx = idx[(idx >= 0) & (idx < n)]
+    alfa = ((fila[idx] - c_f) @ eje) / norma2
+    for a, b, va, vb in zip(idx, idx[1:], alfa, alfa[1:]):
+        if va >= 0.5 > vb:
+            return float(a + (va - 0.5) / (va - vb) * (b - a))
+    return None
+
+
+def bordes_por_fila(mascara: np.ndarray, distancia: np.ndarray | None = None,
+                    img: np.ndarray | None = None
+                    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    """Bordes izquierdo y derecho de cada fila de la silueta, SIN enderezar la imagen.
+
+    Para la reconstrucción con la pose 3D de la cámara: cada borde es un rayo, así
+    que no hace falta rotar nada. Con `distancia` (mapa_distancia) los bordes se
+    refinan con precisión subpíxel respecto de un color de fondo global; con `img`
+    (la foto en color) se usa el modelo de mezcla local, que sirve con cualquier
+    fondo y tiene prioridad. Sin ninguno, los bordes quedan a medio píxel.
+    Devuelve (filas, borde_izq, borde_der, fracción refinada).
+    """
+    m = (mascara > 0).astype(np.uint8)
+    filas, izq, der = _bordes_por_fila(m)
+    bi, bd = izq - 0.5, der + 0.5
+    refinados = 0
+    if img is not None:
+        suave = cv2.GaussianBlur(img.astype(np.float32), (1, 5), 0)   # ruido, en vertical
+        for k, f in enumerate(filas):
+            ci = _cruce_local(suave[f], int(izq[k]), -1)
+            cd = _cruce_local(suave[f], int(der[k]), +1)
+            if ci is not None:
+                bi[k], refinados = ci, refinados + 1
+            if cd is not None:
+                bd[k], refinados = cd, refinados + 1
+    elif distancia is not None:
+        dy = cv2.GaussianBlur(distancia.astype(np.float32), (1, 7), 0)
+        marco = _marco(*dy.shape)
+        fondo = float(np.median(dy[marco]))
+        min_salto = float(5 * dy[marco].std() + 1e-6)
+        for k, f in enumerate(filas):
+            ci = _cruce(dy[f], int(izq[k]), -1, fondo, min_salto)
+            cd = _cruce(dy[f], int(der[k]), +1, fondo, min_salto)
+            if ci is not None:
+                bi[k], refinados = ci, refinados + 1
+            if cd is not None:
+                bd[k], refinados = cd, refinados + 1
+    return filas.astype(float), bi, bd, refinados / max(2 * len(filas), 1)

@@ -213,3 +213,105 @@ def generar_perspectiva(tramos: Tramos, escena: Escena = Escena(),
         "centro_px": (cu, cv),
     }
     return img, verdad
+
+
+def generar_con_hoja(tramos: Tramos, hoja=None, *, distancia_cm: float = 50.0,
+                     altura_camara_cm: float = 25.0, mirar_a_cm: float | None = None,
+                     guinada_grados: float = 0.0, focal_35mm: float = 26.0,
+                     tam: tuple[int, int] = (1200, 1600), escala_impresion: float = 1.0,
+                     desplazamiento_mm: tuple[float, float] = (0.0, 0.0),
+                     color_envase: tuple[int, int, int] = (40, 90, 160),
+                     ruido: float = 3.0, semilla: int = 0,
+                     muestras: int = 120) -> tuple[np.ndarray, dict]:
+    """Foto sintética de la escena del protocolo: la hoja de referencia sobre la mesa
+    y el envase parado en el centro del círculo, con una cámara pinhole real.
+
+    Coordenadas de la hoja (cm): eje del envase vertical por (desplazamiento), base
+    en z = 0. La cámara está a `distancia_cm` en horizontal, a `altura_camara_cm`
+    sobre la mesa, girada `guinada_grados` alrededor del envase, y apunta a
+    `mirar_a_cm` (por defecto, la mitad del envase). Se renderiza al doble de
+    resolución y se reduce, para que los bordes tengan antialiasing realista.
+    """
+    from .plantilla import CARTA, textura
+    hoja = hoja or CARTA
+    rng = np.random.default_rng(semilla)
+    H = tramos[-1][1] - tramos[0][0]
+    rmax = max(max(t[2], t[3]) for t in tramos)
+    ox, oy = desplazamiento_mm[0] / 10, desplazamiento_mm[1] / 10      # eje real [cm]
+    W, Hh = tam
+    ss = 2                                                   # supermuestreo
+    Ws, Hs = W * ss, Hh * ss
+    f = focal_35mm * math.hypot(W, Hh) / 43.27 * ss
+
+    # ---- cámara (look-at) -----------------------------------------------
+    g = math.radians(guinada_grados)
+    C = np.array([distancia_cm * math.sin(g), -distancia_cm * math.cos(g), altura_camara_cm])
+    T = np.array([0.0, 0.0, H / 2 if mirar_a_cm is None else mirar_a_cm])
+    fw = (T - C) / np.linalg.norm(T - C)
+    xc = np.cross(fw, [0, 0, 1.0]); xc /= np.linalg.norm(xc)
+    yc = np.cross(fw, xc)
+    Rm = np.vstack([xc, yc, fw])                             # mundo → cámara
+    cu, cv = Ws / 2, Hs / 2
+
+    # ---- rayo de cada píxel ------------------------------------------------
+    uu, vv = np.meshgrid((np.arange(Ws) + 0.5 - cu) / f, (np.arange(Hs) + 0.5 - cv) / f)
+    d = np.stack([uu, vv, np.ones_like(uu)], -1) @ Rm         # (Hs, Ws, 3) en el mundo
+
+    # ---- fondo: mesa y hoja (plano z = 0) o pared ---------------------------
+    ppm = 6.0                                                # textura: px por mm
+    tex = textura(hoja, ppm).astype(np.float32)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        tz = -C[2] / d[..., 2]
+    X = (C[0] + tz * d[..., 0]) * 10 / escala_impresion       # mm de la hoja
+    Y = (C[1] + tz * d[..., 1]) * 10 / escala_impresion
+    mapx = ((X + hoja.ancho_mm / 2) * ppm - 0.5).astype(np.float32)
+    mapy = ((hoja.alto_mm / 2 - Y) * ppm - 0.5).astype(np.float32)
+    suelo = (d[..., 2] < 0) & np.isfinite(tz)
+    mapx[~suelo] = -1e6
+    mesa = 150.0
+    gris = cv2.remap(tex, mapx, mapy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT,
+                     borderValue=mesa)
+    pared = 205 + 25 * vv / vv.max()
+    gris = np.where(suelo, gris, pared).astype(np.float32)
+    fondo = np.stack([gris * 0.98, gris, gris * 1.02], -1)
+
+    # ---- envase: distancia con signo a lo largo del rayo ---------------------
+    alfa = np.zeros((Hs, Ws), np.float32)
+    px, py = C[0] - ox, C[1] - oy
+    a_ = d[..., 0] ** 2 + d[..., 1] ** 2
+    b_ = 2 * (px * d[..., 0] + py * d[..., 1])
+    disc = b_ * b_ - 4 * a_ * (px * px + py * py - (rmax * 1.05) ** 2)
+    candidatos = disc > 0
+    filas_c = np.where(candidatos.any(axis=1))[0]
+    tt = np.linspace(0, 1, muestras)
+    for f0 in range(filas_c.min(), filas_c.max() + 1, 64):
+        bl = slice(f0, min(f0 + 64, filas_c.max() + 1))
+        ok = candidatos[bl]
+        if not ok.any():
+            continue
+        dd = d[bl][ok]; aa = a_[bl][ok]; bb = b_[bl][ok]; sq = np.sqrt(disc[bl][ok])
+        t0, t1 = (-bb - sq) / (2 * aa), (-bb + sq) / (2 * aa)
+        Tt = t0[:, None] + (t1 - t0)[:, None] * tt
+        PX = px + Tt * dd[:, 0:1]; PY = py + Tt * dd[:, 1:2]; PZ = C[2] + Tt * dd[:, 2:3]
+        rho = np.hypot(PX, PY)
+        gsd = np.min(np.maximum(np.maximum(rho - radio(tramos, PZ), PZ - H), -PZ), axis=1)
+        prof = t0 * np.linalg.norm(dd, axis=1)
+        a_bl = np.zeros(ok.shape, np.float32)
+        a_bl[ok] = np.clip(0.5 - gsd / (prof / f), 0, 1)
+        alfa[bl] = a_bl
+
+    luz = np.ones_like(alfa)
+    for fila in np.where((alfa > 0.5).any(axis=1))[0]:
+        cols = np.flatnonzero(alfa[fila] > 0.5)
+        c0, sw = (cols[0] + cols[-1]) / 2, max((cols[-1] - cols[0]) / 2, 1.0)
+        luz[fila] = 1 - 0.35 * np.clip(np.abs(np.arange(Ws) - c0) / sw, 0, 1) ** 2
+    envase = np.stack([c * luz for c in color_envase], -1)
+    img = alfa[..., None] * envase + (1 - alfa[..., None]) * fondo
+    img = cv2.resize(img.astype(np.float32), (W, Hh), interpolation=cv2.INTER_AREA)
+    img = cv2.GaussianBlur(img, (0, 0), 0.6) + rng.normal(0, ruido, (Hh, W, 3))
+    img = np.clip(img, 0, 255).astype(np.uint8)
+
+    verdad = {"volumen_cm3": volumen_exacto(tramos), "altura_cm": H,
+              "focal_px": f / ss, "camara_cm": C, "eje_cm": (ox, oy),
+              "inclinacion_grados": math.degrees(math.asin(-fw[2]))}
+    return img, verdad
