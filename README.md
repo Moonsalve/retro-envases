@@ -8,8 +8,10 @@ integración numérica.
 - **Fase 2 en curso** — pipeline de visión (foto → perfil → volumen) con corrección de
   perspectiva, validado con fotos sintéticas renderizadas con una cámara pinhole real:
   ≤ 1 % de error entre 35 y 200 cm de distancia (sin corregir: −2 % a −20 %).
-- **App web local en Streamlit** — `app/streamlit_app.py`, con fotos de Descargas.
-  Falta: validar con una foto real tomada siguiendo el protocolo y con la altura medida.
+- **Escala con la hoja de referencia ArUco (opción B)** — la cámara se calibra y se ubica
+  en 3D desde la propia foto: 48/48 escenas sintéticas dentro del 5 % sin conocer la focal.
+- **App web para computador y celular** — `app/streamlit_app.py`, organizada según las
+  etapas del enunciado, con cámara en vivo. Falta: desplegarla y validar con fotos reales.
 
 ---
 
@@ -169,9 +171,9 @@ trapecio baja a 2.6e-5 %), mientras que mejorar la escala cuesta trabajo físico
 | Estrategia de malla | Remuestrear a n múltiplo de 6; integrar por tramos si se detectan quiebres | Permite los tres Newton-Cotes y recupera el orden teórico |
 | Gauss | Solo por tramos, nunca global | Global falla el 5 % con pocos nodos; por tramos exige detectar los quiebres del perfil |
 | Validación | Fotos sintéticas de volumen exacto + un envase de geometría conocida (lata) medido con regla | Sin impresora ni medición con agua; el PDF admite "recipiente de geometría conocida" |
-| Escala | Altura real del envase medida con regla, al medio milímetro | Está sobre el eje: sin problema de coplanaridad. Error objetivo < 0.5 %, límite < 1.64 % |
+| Escala | **Hoja impresa con 4 marcadores ArUco bajo el envase** (antes: altura medida con regla) | Da la escala, la focal y la pose de la cámara desde la foto; ver «Opción B» |
 | Segmentación | Otsu/Canny **y** GrabCut, comparados | Cubre el requisito de la Etapa 1 de investigar dos estrategias |
-| Aplicación | Streamlit, solo en local, con fotos descargadas | Basta para el laboratorio; sin despliegue |
+| Aplicación | Streamlit, web y celular, con cámara en vivo | El enunciado pide aplicación web y captura con la cámara |
 
 ---
 
@@ -285,7 +287,10 @@ con el que se despeja D).
 | Focal equivocada ±5 % | ≤ 1.5 % |
 | Focal equivocada ±10 % | hasta 2.4 % |
 
-## Protocolo de captura (derivado de esos números)
+## Protocolo de captura de la versión sin hoja (histórico)
+
+*Este protocolo correspondía a la escala por la altura medida. Lo reemplaza el de la
+opción B, más abajo.*
 
 1. **Distancia 40–100 cm**, sin zoom (así la focal del EXIF es la de la cámara principal).
 2. **Cámara entre la base y la boca**, idealmente a media altura. Nunca por encima.
@@ -316,52 +321,77 @@ colores. Falta contrastar con fotos reales.
 
 ---
 
-# La aplicación web (local)
+# Opción B — Hoja de referencia con marcadores ArUco
 
-```bash
-cd ~/Developer/retro-envases
-.venv/bin/streamlit run app/streamlit_app.py
+El envase se para en el centro de una hoja impresa (carta o A4) con cuatro marcadores
+ArUco en las esquinas y círculos guía. La geometría de la hoja está definida una sola vez
+en `retroenvases/plantilla.py`, que genera el PDF imprimible.
+
+```
+foto ─► marcadores (esquinas subpíxel) ─► focal y pose de la cámara (calibración en 1 vista)
+     ─► GrabCut iniciado con la geometría ─► bordes subpíxel (mezcla de color local)
+     ─► perfil 3D: cada borde es un rayo tangente al envase; la base está en z = 0
+     ─► filtro de picos ─► remuestreo ─► 4 métodos
 ```
 
-Se abre en `http://localhost:8501`. Funciona solo en local, con fotos ya guardadas en el
-computador.
+**Por qué resuelve los puntos débiles de la versión anterior:**
 
-Flujo, que sigue las etapas del enunciado:
+| Antes (altura medida) | Con la hoja |
+|---|---|
+| Altura medida con regla, su error ×3 en el volumen | La escala sale de la hoja; se mide la distancia ID 0 – ID 1 (~19 cm), ~3 veces menos sensible que medir el lado de un marcador |
+| Focal del EXIF (WhatsApp la borra) | La focal se calibra desde los marcadores: < 1 % de error en todas las pruebas |
+| Inclinación del celular desconocida | Sale de la pose de la cámara |
+| Eje y altura de la cámara estimados | El eje es la vertical del círculo; la base está en z = 0 |
 
-1. **Foto**: se elige de una carpeta (Descargas, Escritorio, Imágenes, Documentos o
-   cualquier ruta que se escriba; la foto más reciente aparece primero), se sube un
-   archivo, o se usa un **ejemplo sintético** de volumen exacto para comprobar que todo
-   funciona.
-2. **Altura del envase**: la app la pide apenas se elige la foto, **sin valor por
-   defecto**, y no deja calcular hasta que se escribe. Es la única referencia de escala.
-3. **Selección del envase**: GrabCut con un rectángulo ajustable (recomendado), GrabCut
-   automático u Otsu (solo con fondo liso).
-4. **Perspectiva**: focal leída del EXIF si la foto la trae. Una foto que llegó por
-   WhatsApp no la trae: se usa 26 mm, la típica de la cámara principal de un celular
-   (±10 % de error en la focal mete hasta 2.4 % en el volumen). Y la inclinación del
-   celular.
-5. **Resultados**: volumen, contorno sobre la foto, perfil en cm, gráfica de π·r², tabla
-   de los 4 métodos con n, [a,b], Δz, orden, integral, volumen y tiempo, y comparación
-   con un volumen de referencia opcional.
-6. **Diagnóstico**: escala, inclinación corregida, asimetría, fracción de bordes
-   subpíxel, distancia y altura estimadas de la cámara, y alertas.
-7. **Datos para el informe**: tabla (zᵢ, rᵢ, rᵢ², π·rᵢ²) y resultados en texto para
-   copiar. La app no descarga archivos.
+**Decisiones que salieron de fallos medidos en el banco:**
+- El suelo *delante* del envase es fondo seguro para GrabCut: así aprende el negro de los
+  marcadores como fondo (antes los incluía y el volumen salía +51 %).
+- Tangencia exacta usando la pendiente de la pared: con la cámara mirando desde arriba,
+  el rayo roza las paredes inclinadas lejos de su máximo acercamiento al eje.
+- Bordes subpíxel con un modelo de mezcla local de color, que funciona delante de un
+  marcador negro o de la hoja blanca (el modelo de fondo global fallaba ahí).
+- Altura de la boca ajustando el arco de su elipse cuando la cámara está por encima.
+- Filtro de Hampel sobre r(z) para quitar picos de segmentación.
 
-**Salvaguardas** (cada una salió de un fallo real al probarla):
+**Banco** (`python -m tests.banco_hoja`), sin conocer la focal ni la pose: **48/48
+escenas dentro del 5 %** (distancia 35–70 cm, cámara a 20–45 cm de altura, girada ±15°,
+envase descentrado hasta 5 mm, focales 24–35 mm, hoja impresa al 97 % con su medida
+corregida). Peor caso 4.4 %, típico 0.3–1.5 %. Sin corregir una hoja impresa al 97 % el
+error es ~10 %: medir la hoja es obligatorio. Sesgo conocido: ~+1 % en envases con base
+acampanada vista desde arriba.
 
-- **"Resultado no confiable"** arriba del volumen si la silueta es muy asimétrica
-  (> 5 %: el contorno incluyó fondo), si el contorno toca el rectángulo (el rectángulo
-  corta el envase) o si la cámara estaba a menos de 25 cm.
-- Altura, focal, inclinación, referencia y rectángulo se **reinician al cambiar de
-  foto** (aunque sea la misma imagen en otra carpeta): antes arrastraban los valores de
-  la anterior.
-- **Sin altura no hay cálculo**: antes venía precargada en 20 cm, y la app calculaba con
-  un número que nadie había medido.
-- GrabCut con **semilla fija**: la misma foto da siempre el mismo volumen.
+## Protocolo de captura
 
-Verificado con `streamlit.testing` (AppTest): el ejemplo sintético da **0.40 %** de
-error; un rectángulo demasiado ancho o que corta el envase dispara el aviso.
+1. Imprimir la hoja al 100 % y medir la distancia entre los bordes exteriores de ID 0 e
+   ID 1 (191.9 mm en carta, 186.0 mm en A4).
+2. Hoja plana sobre la mesa, con ID 0 e ID 1 hacia la cámara; envase de pie y centrado.
+3. Cámara a 40–70 cm, un poco por encima del envase (20–35 cm sobre la mesa).
+4. Que se vean completos al menos ID 0 e ID 1; iluminación pareja, sin reflejos.
+5. En el celular, para máxima resolución, «Subir foto → Cámara» (cámara nativa).
+
+# La aplicación web
+
+```bash
+pip install -r requirements.txt
+streamlit run app/streamlit_app.py
+```
+
+Funciona en el navegador del computador y del celular. Sus secciones siguen el enunciado:
+
+| Sección de la app | Requisito |
+|---|---|
+| Antes de empezar: PDF de la hoja y protocolo de captura | Etapa 2 |
+| 1. Foto: cámara en vivo, subir foto o ejemplo sintético | §8, Etapa 2, MVP |
+| 2. Referencia de escala: medida de la hoja, detección dibujada sobre la foto y explicación de referencia, longitud, coordenadas en píxeles, conversión y supuestos | Etapa 2, §8 |
+| 3. Perfil: tres estrategias (automática con la hoja, GrabCut con rectángulo, Otsu), comparables; imagen, contorno y perfil en cm con sus puntos | Etapas 1 y 3, §8 |
+| 4. Intervalo [a, b], n, Δz y orden de Gauss; justificación del remuestreo | §5, §8 |
+| 5. Tabla i, zᵢ, rᵢ, rᵢ², πrᵢ² | Etapa 4 |
+| 6. Los 4 métodos con n, [a,b], Δz, orden, integral, volumen y tiempo; gráfica; avisos; análisis de cada método | §6, Etapa 5, §8 |
+| 7. Validación contra un volumen de referencia y presupuesto de error por fuente | Etapa 6, MVP |
+| 8. Datos para copiar al informe | §8 |
+
+Con el ejemplo sintético (botella de 616.61 cm³) la app da **1.16 %** de error.
+Verificada con `streamlit.testing` (AppTest) y en Chrome de escritorio.
 
 ## Prueba con una foto real (`data/foto_prueba_1.jpeg`)
 
@@ -403,8 +433,8 @@ una foto que siga el protocolo.
 | §8 Exportación de datos y resultados | Sección 10 |
 | §9 MVP — explicar las fuentes de error | Sección 11 |
 
-Pendiente para la fase 2: §7 Etapas 2 y 3 (captura, escalamiento, extracción del perfil)
-y los requisitos de interfaz de la §8.
+Esa tabla corresponde al notebook. La cobertura de la app está en la sección «La
+aplicación web».
 
 ## Estructura
 
